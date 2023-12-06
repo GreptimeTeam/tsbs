@@ -30,6 +30,10 @@ func (s *Serializer) Serialize(p *data.Point, w io.Writer) (err error) {
 		}
 		switch v := tagValues[i].(type) {
 		case string:
+			if i == 0 {
+				buf = append(buf, '_')
+				buf = append(buf, []byte(v)...)
+			}
 			buf = append(buf, ',')
 			buf = append(buf, tagKeys[i]...)
 			buf = append(buf, '=')
