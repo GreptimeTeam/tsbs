@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -40,7 +41,8 @@ func (d *dbCreator) listDatabases() ([]string, error) {
 		return nil, fmt.Errorf("create request error: %s", err.Error())
 	}
 	if len(auth) > 0 {
-		req.Header.Add(fasthttp.HeaderAuthorization, auth)
+		encoded := base64.StdEncoding.EncodeToString([]byte(auth))
+		req.Header.Add(fasthttp.HeaderAuthorization, "basic "+encoded)
 	}
 	client := &http.Client{}
 
@@ -87,7 +89,8 @@ func (d *dbCreator) RemoveOldDB(dbName string) error {
 		return fmt.Errorf("create request error: %s", err.Error())
 	}
 	if len(auth) > 0 {
-		req.Header.Add(fasthttp.HeaderAuthorization, auth)
+		encoded := base64.StdEncoding.EncodeToString([]byte(auth))
+		req.Header.Add(fasthttp.HeaderAuthorization, "basic "+encoded)
 	}
 	req.Header.Add(fasthttp.HeaderContentType, "text/plain")
 	client := &http.Client{}
@@ -110,7 +113,8 @@ func (d *dbCreator) CreateDB(dbName string) error {
 		return fmt.Errorf("create request error: %s", err.Error())
 	}
 	if len(auth) > 0 {
-		req.Header.Add(fasthttp.HeaderAuthorization, auth)
+		encoded := base64.StdEncoding.EncodeToString([]byte(auth))
+		req.Header.Add(fasthttp.HeaderAuthorization, "basic "+encoded)
 	}
 	client := &http.Client{}
 
