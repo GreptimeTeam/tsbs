@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/valyala/fasthttp"
 )
 
 type dbCreator struct {
@@ -33,7 +35,16 @@ func (d *dbCreator) DBExists(dbName string) bool {
 
 func (d *dbCreator) listDatabases() ([]string, error) {
 	u := fmt.Sprintf("%s/v1/sql?sql=show%%20databases", d.daemonURL)
-	resp, err := http.Get(u)
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request error: %s", err.Error())
+	}
+	if len(auth) > 0 {
+		req.Header.Add(fasthttp.HeaderAuthorization, auth)
+	}
+	client := &http.Client{}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("listDatabases error: %s", err.Error())
 	}
@@ -71,7 +82,17 @@ func (d *dbCreator) listDatabases() ([]string, error) {
 
 func (d *dbCreator) RemoveOldDB(dbName string) error {
 	u := fmt.Sprintf("%s/v1/sql?sql=drop+database+%s", d.daemonURL, dbName)
-	resp, err := http.Post(u, "text/plain", nil)
+	req, err := http.NewRequest("POST", u, nil)
+	if err != nil {
+		return fmt.Errorf("create request error: %s", err.Error())
+	}
+	if len(auth) > 0 {
+		req.Header.Add(fasthttp.HeaderAuthorization, auth)
+	}
+	req.Header.Add(fasthttp.HeaderContentType, "text/plain")
+	client := &http.Client{}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("drop db error: %s", err.Error())
 	}
@@ -84,7 +105,16 @@ func (d *dbCreator) RemoveOldDB(dbName string) error {
 
 func (d *dbCreator) CreateDB(dbName string) error {
 	u := fmt.Sprintf("%s/v1/sql?sql=create%%20database%%20%s", d.daemonURL, dbName)
-	resp, err := http.Get(u)
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return fmt.Errorf("create request error: %s", err.Error())
+	}
+	if len(auth) > 0 {
+		req.Header.Add(fasthttp.HeaderAuthorization, auth)
+	}
+	client := &http.Client{}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("create db error: %s", err.Error())
 	}
