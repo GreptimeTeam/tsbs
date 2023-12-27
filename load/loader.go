@@ -3,13 +3,14 @@ package load
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/timescale/tsbs/pkg/targets"
 	"io/ioutil"
 	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/timescale/tsbs/pkg/targets"
 
 	"github.com/spf13/pflag"
 	"github.com/timescale/tsbs/load/insertstrategy"
@@ -47,6 +48,8 @@ type BenchmarkRunnerConfig struct {
 	// deprecated, should not be used in other places other than tsbs_load_xx commands
 	FileName string `yaml:"file" mapstructure:"file" json:"file"`
 	Seed     int64  `yaml:"seed" mapstructure:"seed" json:"seed"`
+	// custom fields
+	Auth string `yaml:"auth" mapstructure:"auth" json:"auth"`
 }
 
 // AddToFlagSet adds command line flags needed by the BenchmarkRunnerConfig to the flag set.
@@ -64,6 +67,7 @@ func (c BenchmarkRunnerConfig) AddToFlagSet(fs *pflag.FlagSet) {
 	fs.String("insert-intervals", "", "Time to wait between each insert, default '' => all workers insert ASAP. '1,2' = worker 1 waits 1s between inserts, worker 2 and others wait 2s")
 	fs.Bool("hash-workers", false, "Whether to consistently hash insert data to the same workers (i.e., the data for a particular host always goes to the same worker)")
 	fs.String("results-file", "", "Write the test results summary json to this file")
+	fs.String("auth", "", "Add auth header to HTTP request")
 }
 
 type BenchmarkRunner interface {
