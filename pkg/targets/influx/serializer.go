@@ -1,9 +1,12 @@
 package influx
 
 import (
+	"io"
+	"math/rand"
+	"strconv"
+
 	"github.com/timescale/tsbs/pkg/data"
 	"github.com/timescale/tsbs/pkg/data/serialize"
-	"io"
 )
 
 // Serializer writes a Point in a serialized form for MongoDB
@@ -19,7 +22,9 @@ type Serializer struct{}
 // foo,tag0=bar baz=-1.0 100\n
 func (s *Serializer) Serialize(p *data.Point, w io.Writer) (err error) {
 	buf := make([]byte, 0, 1024)
-	buf = append(buf, p.MeasurementName()...)
+
+	name := []byte(string(p.MeasurementName()[:]) + strconv.Itoa(rand.Intn(20)))
+	buf = append(buf, name...)
 
 	fakeTags := make([]int, 0)
 	tagKeys := p.TagKeys()
