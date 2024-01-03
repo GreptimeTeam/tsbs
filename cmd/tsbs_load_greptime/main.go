@@ -87,6 +87,8 @@ func init() {
 		log.Fatal("missing 'urls' flag")
 	}
 	config.HashWorkers = false
+	// try manually set no flow control
+	config.NoFlowControl = true
 	loader = load.GetBenchmarkRunner(config)
 }
 
