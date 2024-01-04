@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -80,7 +81,8 @@ func (w *HTTPClient) Do(q *query.HTTP, opts *HTTPClientDoOptions) (lag float64, 
 	}
 
 	if isV2 {
-		req.Header.Add("Authorization", "Token "+authToken)
+		encoded := base64.StdEncoding.EncodeToString([]byte(authToken))
+		req.Header.Add("Authorization", "Basic "+encoded)
 	}
 
 	// Perform the request while tracking latency:
