@@ -3,7 +3,6 @@ package main
 // This file lifted wholesale from mountainflux by Mark Rushakoff.
 
 import (
-	"bytes"
 	"fmt"
 	"net/url"
 	"time"
