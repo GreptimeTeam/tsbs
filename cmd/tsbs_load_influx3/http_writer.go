@@ -82,8 +82,6 @@ func (w *HTTPWriter) executeReq(req *fasthttp.Request, resp *fasthttp.Response) 
 		sc := resp.StatusCode()
 		if sc == 500 && backpressurePred(resp.Body()) {
 			err = errBackoff
-		} else if sc != fasthttp.StatusNoContent {
-			err = fmt.Errorf("[DebugInfo: %s] Invalid write response (status %d): %s", w.c.DebugInfo, sc, resp.Body())
 		}
 	}
 	return lat, err
