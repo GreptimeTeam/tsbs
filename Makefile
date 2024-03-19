@@ -22,6 +22,7 @@ loaders: tsbs_load \
 		 tsbs_load_cratedb \
 		 tsbs_load_influx \
 		 tsbs_load_influx2 \
+		 tsbs_load_influx3 \
  		 tsbs_load_mongo \
  		 tsbs_load_prometheus \
  		 tsbs_load_siridb \
