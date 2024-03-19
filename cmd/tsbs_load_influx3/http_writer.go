@@ -105,19 +105,5 @@ func (w *HTTPWriter) WriteLineProtocol(body []byte, isGzip bool) (int64, error) 
 }
 
 func backpressurePred(body []byte) bool {
-	if bytes.Contains(body, backoffMagicWords0) {
-		return true
-	} else if bytes.Contains(body, backoffMagicWords1) {
-		return true
-	} else if bytes.Contains(body, backoffMagicWords2a) && bytes.Contains(body, backoffMagicWords2b) {
-		return true
-	} else if bytes.Contains(body, backoffMagicWords3) {
-		return true
-	} else if bytes.Contains(body, backoffMagicWords4) {
-		return true
-	} else if bytes.Contains(body, backoffMagicWords5) {
-		return true
-	} else {
-		return false
-	}
+	return false
 }
