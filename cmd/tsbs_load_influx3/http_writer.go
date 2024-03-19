@@ -56,7 +56,7 @@ func NewHTTPWriter(c HTTPWriterConfig, consistency string) *HTTPWriter {
 		},
 
 		c:   c,
-		url: []byte(c.Host + "/write?consistency=" + consistency + "&db=" + url.QueryEscape(c.Database)),
+		url: []byte(c.Host + "/write_lp?consistency=" + consistency + "&db=" + url.QueryEscape(c.Database)),
 	}
 }
 
