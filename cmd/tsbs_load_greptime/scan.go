@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"log"
 	"strings"
 
 	"github.com/timescale/tsbs/pkg/data"
@@ -47,6 +48,7 @@ func (b *batch) Append(item data.LoadedPoint) {
 	b.rows++
 	// Each influx line is format "csv-tags csv-fields timestamp", so we split by space
 	// and then on the middle element, we split by comma to count number of fields added
+	log.Println("debug======:", thatStr)
 	args := strings.Split(thatStr, " ")
 	if len(args) != 3 {
 		fatal(errNotThreeTuplesFmt, len(args))
