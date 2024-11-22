@@ -224,7 +224,8 @@ func (d *dbCreator) createTableAndIndexes(dbBench *sql.DB, tableName string, fie
 
 		var chunkTimeInterval = d.opts.ChunkTime.Nanoseconds() / 1000
 		fmt.Println(chunkTimeInterval, partitionsOption)
-		_ = chunkTimeInterval
+
+		// obselete and also not useful in standalone tests
 		_ = partitionsOption
 
 		// TODO: update create hyper table command
@@ -232,8 +233,10 @@ func (d *dbCreator) createTableAndIndexes(dbBench *sql.DB, tableName string, fie
 			creationCommand, tableName)
 
 		fmt.Println("create cmd:", fullCmd)
-
 		MustExec(dbBench, fullCmd)
+
+		var setChunkCmd = fmt.Sprintf("SELECT set_chunk_time_interval('%s', %d)", tableName, chunkTimeInterval)
+		MustExec(dbBench, setChunkCmd)
 	}
 }
 
