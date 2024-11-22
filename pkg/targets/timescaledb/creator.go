@@ -236,6 +236,7 @@ func (d *dbCreator) createTableAndIndexes(dbBench *sql.DB, tableName string, fie
 		MustExec(dbBench, fullCmd)
 
 		var setChunkCmd = fmt.Sprintf("SELECT set_chunk_time_interval('%s', %d)", tableName, chunkTimeInterval)
+		fmt.Println("set cmd:", setChunkCmd)
 		MustExec(dbBench, setChunkCmd)
 	}
 }
