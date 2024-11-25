@@ -222,9 +222,22 @@ func (d *dbCreator) createTableAndIndexes(dbBench *sql.DB, tableName string, fie
 			partitionsOption = fmt.Sprintf("partitioning_column => '%s'::name, replication_factor => %v::smallint", partitionColumn, d.opts.ReplicationFactor)
 		}
 
-		MustExec(dbBench,
-			fmt.Sprintf("SELECT %s('%s'::regclass, 'time'::name, %s, chunk_time_interval => %d, create_default_indexes=>FALSE)",
-				creationCommand, tableName, partitionsOption, d.opts.ChunkTime.Nanoseconds()/1000))
+		var chunkTimeInterval = d.opts.ChunkTime.Nanoseconds() / 1000
+		fmt.Println(chunkTimeInterval, partitionsOption)
+
+		// obselete and also not useful in standalone tests
+		_ = partitionsOption
+
+		// TODO: update create hyper table command
+		var fullCmd = fmt.Sprintf("SELECT %s('%s'::regclass, by_range('time'), create_default_indexes=>FALSE)",
+			creationCommand, tableName)
+
+		fmt.Println("create cmd:", fullCmd)
+		MustExec(dbBench, fullCmd)
+
+		var setChunkCmd = fmt.Sprintf("SELECT set_chunk_time_interval('%s', %d)", tableName, chunkTimeInterval)
+		fmt.Println("set cmd:", setChunkCmd)
+		MustExec(dbBench, setChunkCmd)
 	}
 }
 

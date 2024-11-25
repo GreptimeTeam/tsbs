@@ -143,12 +143,14 @@ func createMetricsTable(conf *ClickhouseConfig, db *sqlx.DB, tableName string, f
 				tags_id         UInt32,
 				%s,
 				additional_tags String   DEFAULT ''
-			) ENGINE = MergeTree(created_date, (tags_id, created_at), 8192)
+			) ENGINE = MergeTree()
+			ORDER BY (tags_id, created_at, created_date)
+			PRIMARY KEY (tags_id, created_at)
 			`,
 		tableName,
 		strings.Join(columnsWithType, ","))
 	if conf.Debug > 0 {
-		fmt.Printf(sql)
+		fmt.Print(sql)
 	}
 	_, err := db.Exec(sql)
 	if err != nil {
@@ -174,15 +176,18 @@ func generateTagsTableQuery(tagNames, tagTypes []string) string {
 
 	index := "id"
 
-	return fmt.Sprintf(
+	var fullCreateTableCmd = fmt.Sprintf(
 		"CREATE TABLE tags(\n"+
 			"created_date Date     DEFAULT today(),\n"+
 			"created_at   DateTime DEFAULT now(),\n"+
 			"id           UInt32,\n"+
 			"%s"+
-			") ENGINE = MergeTree(created_date, (%s), 8192)",
+			")\nENGINE = MergeTree()\n"+
+			"ORDER BY (created_date, %s)",
 		cols,
 		index)
+	fmt.Println("Create table query: ", fullCreateTableCmd)
+	return fullCreateTableCmd
 }
 
 func serializedTypeToClickHouseType(serializedType string) string {
