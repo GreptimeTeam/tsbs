@@ -70,7 +70,7 @@ func (d *Devops) GroupByTime(qi query.Query, nHosts, numMetrics int, timeRange t
 // LIMIT $LIMIT
 func (d *Devops) GroupByOrderByLimit(qi query.Query) {
 	interval := d.Interval.MustRandWindow(time.Hour)
-	where := fmt.Sprintf("WHERE ts < '%s'", interval.EndString())
+	where := fmt.Sprintf("WHERE greptime_timestamp < '%s'", interval.EndString())
 
 	humanLabel := "Influx max cpu over last 5 min-intervals (random end)"
 	humanDesc := fmt.Sprintf("%s: %s", humanLabel, interval.StartString())
