@@ -93,7 +93,7 @@ func (d *Devops) GroupByTimeAndPrimaryTag(qi query.Query, numMetrics int) {
 
 	humanLabel := devops.GetDoubleGroupByLabel("Influx", numMetrics)
 	humanDesc := fmt.Sprintf("%s: %s", humanLabel, interval.StartString())
-	influxql := fmt.Sprintf("SELECT %s, date_trunc('hour', ts) from cpu where greptime_timestamp >= '%s' and greptime_timestamp < '%s' group by date_trunc('hour', greptime_timestamp),hostname", strings.Join(selectClauses, ", "), interval.StartString(), interval.EndString())
+	influxql := fmt.Sprintf("SELECT %s, date_trunc('hour', greptime_timestamp) from cpu where greptime_timestamp >= '%s' and greptime_timestamp < '%s' group by date_trunc('hour', greptime_timestamp),hostname", strings.Join(selectClauses, ", "), interval.StartString(), interval.EndString())
 	d.fillInQuery(qi, humanLabel, humanDesc, influxql)
 }
 
