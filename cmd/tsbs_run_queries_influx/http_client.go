@@ -83,6 +83,19 @@ func (w *HTTPClient) Do(q *query.HTTP, opts *HTTPClientDoOptions) (lag float64, 
 		req.Header.Add("Authorization", "Token "+authToken)
 	}
 
+	if opts != nil {
+		// Print debug messages, if applicable:
+		switch opts.Debug {
+		case 1:
+			fmt.Fprintf(os.Stderr, "debug: %s\n", q.HumanLabel)
+		case 2:
+			fmt.Fprintf(os.Stderr, "debug: %s -- %s\n", q.HumanLabel, q.HumanDescription)
+		case 3:
+			fmt.Fprintf(os.Stderr, "debug: %s -- %s\n", q.HumanLabel, q.HumanDescription)
+			fmt.Fprintf(os.Stderr, "debug:   request: %s\n", string(q.String()))
+		}
+	}
+
 	// Perform the request while tracking latency:
 	start := time.Now()
 	resp, err := w.client.Do(req)
