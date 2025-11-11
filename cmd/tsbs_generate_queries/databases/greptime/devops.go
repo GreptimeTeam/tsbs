@@ -59,7 +59,7 @@ func (d *Devops) GroupByTime(qi query.Query, nHosts, numMetrics int, timeRange t
 
 	humanLabel := fmt.Sprintf("Influx %d cpu metric(s), random %4d hosts, random %s by 1m", numMetrics, nHosts, timeRange)
 	humanDesc := fmt.Sprintf("%s: %s", humanLabel, interval.StartString())
-	influxql := fmt.Sprintf("SELECT %s, date_trunc('minute', ts) from cpu where %s and ts >= '%s' and ts < '%s' group by date_trunc('minute', ts)", strings.Join(selectClauses, ", "), whereHosts, interval.StartString(), interval.EndString())
+	influxql := fmt.Sprintf("SELECT %s, date_trunc('minute', greptime_timestamp) from cpu where %s and greptime_timestamp >= '%s' and greptime_timestamp < '%s' group by date_trunc('minute', greptime_timestamp)", strings.Join(selectClauses, ", "), whereHosts, interval.StartString(), interval.EndString())
 	d.fillInQuery(qi, humanLabel, humanDesc, influxql)
 }
 
@@ -70,11 +70,11 @@ func (d *Devops) GroupByTime(qi query.Query, nHosts, numMetrics int, timeRange t
 // LIMIT $LIMIT
 func (d *Devops) GroupByOrderByLimit(qi query.Query) {
 	interval := d.Interval.MustRandWindow(time.Hour)
-	where := fmt.Sprintf("WHERE ts < '%s'", interval.EndString())
+	where := fmt.Sprintf("WHERE greptime_timestamp < '%s'", interval.EndString())
 
 	humanLabel := "Influx max cpu over last 5 min-intervals (random end)"
 	humanDesc := fmt.Sprintf("%s: %s", humanLabel, interval.StartString())
-	influxql := fmt.Sprintf(`SELECT max(usage_user), date_trunc('minute', ts) from cpu %s group by date_trunc('minute', ts) order by date_trunc('minute', ts) desc limit 5`, where)
+	influxql := fmt.Sprintf(`SELECT max(usage_user), date_trunc('minute', greptime_timestamp) from cpu %s group by date_trunc('minute', greptime_timestamp) order by date_trunc('minute', greptime_timestamp) desc limit 5`, where)
 	d.fillInQuery(qi, humanLabel, humanDesc, influxql)
 }
 
@@ -93,7 +93,7 @@ func (d *Devops) GroupByTimeAndPrimaryTag(qi query.Query, numMetrics int) {
 
 	humanLabel := devops.GetDoubleGroupByLabel("Influx", numMetrics)
 	humanDesc := fmt.Sprintf("%s: %s", humanLabel, interval.StartString())
-	influxql := fmt.Sprintf("SELECT %s, date_trunc('hour', ts) from cpu where ts >= '%s' and ts < '%s' group by date_trunc('hour', ts),hostname", strings.Join(selectClauses, ", "), interval.StartString(), interval.EndString())
+	influxql := fmt.Sprintf("SELECT %s, date_trunc('hour', greptime_timestamp) from cpu where greptime_timestamp >= '%s' and greptime_timestamp < '%s' group by date_trunc('hour', greptime_timestamp),hostname", strings.Join(selectClauses, ", "), interval.StartString(), interval.EndString())
 	d.fillInQuery(qi, humanLabel, humanDesc, influxql)
 }
 
@@ -111,7 +111,7 @@ func (d *Devops) MaxAllCPU(qi query.Query, nHosts int, duration time.Duration) {
 
 	humanLabel := devops.GetMaxAllLabel("Influx", nHosts)
 	humanDesc := fmt.Sprintf("%s: %s", humanLabel, interval.StartString())
-	influxql := fmt.Sprintf("SELECT %s, date_trunc('hour', ts) from cpu where %s and ts >= '%s' and ts < '%s' group by date_trunc('hour', ts)", strings.Join(selectClauses, ","), whereHosts, interval.StartString(), interval.EndString())
+	influxql := fmt.Sprintf("SELECT %s, date_trunc('hour', greptime_timestamp) from cpu where %s and greptime_timestamp >= '%s' and greptime_timestamp < '%s' group by date_trunc('hour', greptime_timestamp)", strings.Join(selectClauses, ","), whereHosts, interval.StartString(), interval.EndString())
 	d.fillInQuery(qi, humanLabel, humanDesc, influxql)
 }
 
@@ -119,7 +119,7 @@ func (d *Devops) MaxAllCPU(qi query.Query, nHosts int, duration time.Duration) {
 func (d *Devops) LastPointPerHost(qi query.Query) {
 	humanLabel := "Influx last row per host"
 	humanDesc := humanLabel + ": cpu"
-	influxql := "select last_value(hostname order by ts), last_value(region order by ts), last_value(datacenter order by ts), last_value(rack order by ts), last_value(os order by ts), last_value(arch order by ts), last_value(team order by ts), last_value(service order by ts), last_value(service_version order by ts), last_value(service_environment order by ts), last_value(usage_user order by ts), last_value(usage_system order by ts), last_value(usage_idle order by ts), last_value(usage_nice order by ts), last_value(usage_iowait order by ts), last_value(usage_irq order by ts), last_value(usage_softirq order by ts), last_value(usage_steal order by ts), last_value(usage_guest order by ts), last_value(usage_guest_nice order by ts) from cpu group by hostname"
+	influxql := "select last_value(hostname order by greptime_timestamp), last_value(region order by greptime_timestamp), last_value(datacenter order by greptime_timestamp), last_value(rack order by greptime_timestamp), last_value(os order by greptime_timestamp), last_value(arch order by greptime_timestamp), last_value(team order by greptime_timestamp), last_value(service order by greptime_timestamp), last_value(service_version order by greptime_timestamp), last_value(service_environment order by greptime_timestamp), last_value(usage_user order by greptime_timestamp), last_value(usage_system order by greptime_timestamp), last_value(usage_idle order by greptime_timestamp), last_value(usage_nice order by greptime_timestamp), last_value(usage_iowait order by greptime_timestamp), last_value(usage_irq order by greptime_timestamp), last_value(usage_softirq order by greptime_timestamp), last_value(usage_steal order by greptime_timestamp), last_value(usage_guest order by greptime_timestamp), last_value(usage_guest_nice order by greptime_timestamp) from cpu group by hostname"
 	d.fillInQuery(qi, humanLabel, humanDesc, influxql)
 }
 
@@ -144,6 +144,6 @@ func (d *Devops) HighCPUForHosts(qi query.Query, nHosts int) {
 	humanLabel, err := devops.GetHighCPULabel("Influx", nHosts)
 	databases.PanicIfErr(err)
 	humanDesc := fmt.Sprintf("%s: %s", humanLabel, interval.StartString())
-	influxql := fmt.Sprintf("SELECT * from cpu where usage_user > 90.0 %s and ts >= '%s' and ts < '%s'", hostWhereClause, interval.StartString(), interval.EndString())
+	influxql := fmt.Sprintf("SELECT * from cpu where usage_user > 90.0 %s and greptime_timestamp >= '%s' and greptime_timestamp < '%s'", hostWhereClause, interval.StartString(), interval.EndString())
 	d.fillInQuery(qi, humanLabel, humanDesc, influxql)
 }
