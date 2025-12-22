@@ -26,6 +26,8 @@ func (p *processor) Init(numWorker int, _, _ bool) {
 		DebugInfo: fmt.Sprintf("worker #%d, dest url: %s", numWorker, daemonURL),
 		Host:      daemonURL,
 		Database:  loader.DatabaseName(),
+		Username:  username,
+		Password:  password,
 	}
 	w := NewHTTPWriter(cfg, consistency)
 	p.initWithHTTPWriter(numWorker, w)

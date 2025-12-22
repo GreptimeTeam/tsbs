@@ -30,6 +30,8 @@ var (
 	useGzip           bool
 	doAbortOnExist    bool
 	consistency       string
+	username          string
+	password          string
 )
 
 // Global vars
@@ -75,6 +77,8 @@ func init() {
 	consistency = viper.GetString("consistency")
 	backoff = viper.GetDuration("backoff")
 	useGzip = viper.GetBool("gzip")
+	username = viper.GetString("user")
+	password = viper.GetString("password")
 
 	if _, ok := consistencyChoices[consistency]; !ok {
 		log.Fatalf("invalid consistency settings")

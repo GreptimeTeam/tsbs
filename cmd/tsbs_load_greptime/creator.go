@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -15,6 +16,15 @@ type dbCreator struct {
 
 func (d *dbCreator) Init() {
 	d.daemonURL = daemonURLs[0] // pick first one since it always exists
+}
+
+// addAuthHeader adds Basic authentication header to the request if credentials are provided
+func (d *dbCreator) addAuthHeader(req *http.Request) {
+	if username != "" || password != "" {
+		credentials := username + ":" + password
+		encoded := base64.StdEncoding.EncodeToString([]byte(credentials))
+		req.Header.Set("Authorization", "Basic "+encoded)
+	}
 }
 
 func (d *dbCreator) DBExists(dbName string) bool {
@@ -33,7 +43,14 @@ func (d *dbCreator) DBExists(dbName string) bool {
 
 func (d *dbCreator) listDatabases() ([]string, error) {
 	u := fmt.Sprintf("%s/v1/sql?sql=show%%20databases", d.daemonURL)
-	resp, err := http.Get(u)
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("listDatabases error: %s", err.Error())
+	}
+	d.addAuthHeader(req)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("listDatabases error: %s", err.Error())
 	}
@@ -71,10 +88,20 @@ func (d *dbCreator) listDatabases() ([]string, error) {
 
 func (d *dbCreator) RemoveOldDB(dbName string) error {
 	u := fmt.Sprintf("%s/v1/sql?sql=drop+database+%s", d.daemonURL, dbName)
-	resp, err := http.Post(u, "text/plain", nil)
+	req, err := http.NewRequest("POST", u, nil)
 	if err != nil {
 		return fmt.Errorf("drop db error: %s", err.Error())
 	}
+	req.Header.Set("Content-Type", "text/plain")
+	d.addAuthHeader(req)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("drop db error: %s", err.Error())
+	}
+	defer resp.Body.Close()
+
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("drop db returned non-200 code: %d", resp.StatusCode)
 	}
@@ -84,7 +111,14 @@ func (d *dbCreator) RemoveOldDB(dbName string) error {
 
 func (d *dbCreator) CreateDB(dbName string) error {
 	u := fmt.Sprintf("%s/v1/sql?sql=create%%20database%%20%s", d.daemonURL, dbName)
-	resp, err := http.Get(u)
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return fmt.Errorf("create db error: %s", err.Error())
+	}
+	d.addAuthHeader(req)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("create db error: %s", err.Error())
 	}
