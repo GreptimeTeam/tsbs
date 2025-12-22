@@ -20,7 +20,7 @@ func (d *dbCreator) Init() {
 
 // addAuthHeader adds Basic authentication header to the request if credentials are provided
 func (d *dbCreator) addAuthHeader(req *http.Request) {
-	if username != "" || password != "" {
+	if username != "" && password != "" {
 		credentials := username + ":" + password
 		encoded := base64.StdEncoding.EncodeToString([]byte(credentials))
 		req.Header.Set("Authorization", "Basic "+encoded)

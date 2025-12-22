@@ -68,7 +68,7 @@ func NewHTTPWriter(c HTTPWriterConfig, consistency string) *HTTPWriter {
 	}
 
 	// Generate Basic auth header if credentials are provided
-	if c.Username != "" || c.Password != "" {
+	if c.Username != "" && c.Password != "" {
 		credentials := c.Username + ":" + c.Password
 		encoded := base64.StdEncoding.EncodeToString([]byte(credentials))
 		w.authHeader = []byte("Basic " + encoded)
