@@ -23,6 +23,8 @@ func (t *influxTarget) TargetSpecificFlags(flagPrefix string, flagSet *pflag.Fla
 	flagSet.String(flagPrefix+"consistency", "all", "Write consistency. Must be one of: any, one, quorum, all.")
 	flagSet.Duration(flagPrefix+"backoff", time.Second, "Time to sleep between requests when server indicates backpressure is needed.")
 	flagSet.Bool(flagPrefix+"gzip", true, "Whether to gzip encode requests (default true).")
+	flagSet.String(flagPrefix+"user", "", "Username for authentication.")
+	flagSet.String(flagPrefix+"password", "", "Password for authentication.")
 }
 
 func (t *influxTarget) TargetName() string {

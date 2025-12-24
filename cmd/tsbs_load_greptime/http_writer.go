@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"net/url"
 	"time"
@@ -38,19 +39,26 @@ type HTTPWriterConfig struct {
 
 	// Debug label for more informative errors.
 	DebugInfo string
+
+	// Username for authentication.
+	Username string
+
+	// Password for authentication.
+	Password string
 }
 
 // HTTPWriter is a Writer that writes to an InfluxDB HTTP server.
 type HTTPWriter struct {
 	client fasthttp.Client
 
-	c   HTTPWriterConfig
-	url []byte
+	c          HTTPWriterConfig
+	url        []byte
+	authHeader []byte
 }
 
 // NewHTTPWriter returns a new HTTPWriter from the supplied HTTPWriterConfig.
 func NewHTTPWriter(c HTTPWriterConfig, consistency string) *HTTPWriter {
-	return &HTTPWriter{
+	w := &HTTPWriter{
 		client: fasthttp.Client{
 			Name: httpClientName,
 		},
@@ -58,6 +66,15 @@ func NewHTTPWriter(c HTTPWriterConfig, consistency string) *HTTPWriter {
 		c:   c,
 		url: []byte(c.Host + "/v1/influxdb/write?consistency=" + consistency + "&db=" + url.QueryEscape(c.Database)),
 	}
+
+	// Generate Basic auth header if credentials are provided
+	if c.Username != "" && c.Password != "" {
+		credentials := c.Username + ":" + c.Password
+		encoded := base64.StdEncoding.EncodeToString([]byte(credentials))
+		w.authHeader = []byte("Basic " + encoded)
+	}
+
+	return w
 }
 
 var (
@@ -71,6 +88,9 @@ func (w *HTTPWriter) initializeReq(req *fasthttp.Request, body []byte, isGzip bo
 	req.Header.SetRequestURIBytes(w.url)
 	if isGzip {
 		req.Header.Add(headerContentEncoding, headerGzip)
+	}
+	if len(w.authHeader) > 0 {
+		req.Header.SetBytesKV([]byte("Authorization"), w.authHeader)
 	}
 	req.SetBody(body)
 }
