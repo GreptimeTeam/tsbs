@@ -83,7 +83,14 @@ func appendField(buf, key []byte, v interface{}) []byte {
 	buf = append(buf, key...)
 	buf = append(buf, '=')
 
-	buf = serialize.FastFormatAppend(v, buf)
+	switch v.(type) {
+	case string:
+		buf = append(buf, '"')
+		buf = append(buf, v.(string)...)
+		buf = append(buf, '"')
+	default:
+		buf = serialize.FastFormatAppend(v, buf)
+	}
 
 	// Influx uses 'i' to indicate integers:
 	switch v.(type) {

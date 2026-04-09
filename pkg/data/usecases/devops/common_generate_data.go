@@ -115,15 +115,15 @@ func (s *commonDevopsSimulator) populatePoint(p *data.Point, measureIdx int) boo
 
 	// Populate host-specific tags:
 	p.AppendTag(MachineTagKeys[0], host.Name)
-	p.AppendTag(MachineTagKeys[1], host.Region)
-	p.AppendTag(MachineTagKeys[2], host.Datacenter)
-	p.AppendTag(MachineTagKeys[3], host.Rack)
-	p.AppendTag(MachineTagKeys[4], host.OS)
-	p.AppendTag(MachineTagKeys[5], host.Arch)
-	p.AppendTag(MachineTagKeys[6], host.Team)
-	p.AppendTag(MachineTagKeys[7], host.Service)
-	p.AppendTag(MachineTagKeys[8], host.ServiceVersion)
-	p.AppendTag(MachineTagKeys[9], host.ServiceEnvironment)
+	p.AppendField(MachineTagKeys[1], host.Region)
+	p.AppendField(MachineTagKeys[2], host.Datacenter)
+	p.AppendField(MachineTagKeys[3], host.Rack)
+	p.AppendField(MachineTagKeys[4], host.OS)
+	p.AppendField(MachineTagKeys[5], host.Arch)
+	p.AppendField(MachineTagKeys[6], host.Team)
+	p.AppendField(MachineTagKeys[7], host.Service)
+	p.AppendField(MachineTagKeys[8], host.ServiceVersion)
+	p.AppendField(MachineTagKeys[9], host.ServiceEnvironment)
 
 	// Populate measurement-specific tags and fields:
 	host.SimulatedMeasurements[measureIdx].ToPoint(p)

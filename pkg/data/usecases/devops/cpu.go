@@ -10,16 +10,16 @@ import (
 var (
 	labelCPU  = []byte("cpu") // heap optimization
 	cpuFields = []common.LabeledDistributionMaker{
-		{Label: []byte("usage_user"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 0.0, 100.0, rand.Float64()*100.0) }},
-		{Label: []byte("usage_system"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 0.0, 100.0, rand.Float64()*100.0) }},
-		{Label: []byte("usage_idle"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 0.0, 100.0, rand.Float64()*100.0) }},
-		{Label: []byte("usage_nice"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 0.0, 100.0, rand.Float64()*100.0) }},
-		{Label: []byte("usage_iowait"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 0.0, 100.0, rand.Float64()*100.0) }},
-		{Label: []byte("usage_irq"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 0.0, 100.0, rand.Float64()*100.0) }},
-		{Label: []byte("usage_softirq"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 0.0, 100.0, rand.Float64()*100.0) }},
-		{Label: []byte("usage_steal"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 0.0, 100.0, rand.Float64()*100.0) }},
-		{Label: []byte("usage_guest"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 0.0, 100.0, rand.Float64()*100.0) }},
-		{Label: []byte("usage_guest_nice"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 0.0, 100.0, rand.Float64()*100.0) }},
+		{Label: []byte("usage_user"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 95.0, 100.0, rand.Float64()*100.0) }},
+		{Label: []byte("usage_system"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 95.0, 100.0, rand.Float64()*100.0) }},
+		{Label: []byte("usage_idle"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 95.0, 100.0, rand.Float64()*100.0) }},
+		{Label: []byte("usage_nice"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 95.0, 100.0, rand.Float64()*100.0) }},
+		{Label: []byte("usage_iowait"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 95.0, 100.0, rand.Float64()*100.0) }},
+		{Label: []byte("usage_irq"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 95.0, 100.0, rand.Float64()*100.0) }},
+		{Label: []byte("usage_softirq"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 95.0, 100.0, rand.Float64()*100.0) }},
+		{Label: []byte("usage_steal"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 95.0, 100.0, rand.Float64()*100.0) }},
+		{Label: []byte("usage_guest"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 95.0, 100.0, rand.Float64()*100.0) }},
+		{Label: []byte("usage_guest_nice"), DistributionMaker: func() common.Distribution { return common.CWD(cpuND, 95.0, 100.0, rand.Float64()*100.0) }},
 	}
 )
 

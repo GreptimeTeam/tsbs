@@ -15,7 +15,7 @@ const (
 	machineRackChoicesPerDatacenter = 100
 	machineServiceChoices           = 20
 	machineServiceVersionChoices    = 2
-	hostFmt                         = "host_%d"
+	hostFmt                         = "greptime-dev-compute-host-%d"
 )
 
 type region struct {
@@ -96,19 +96,18 @@ var regions = []region{
 
 var (
 	MachineTeamChoices = []string{
-		"SF",
-		"NYC",
-		"LON",
-		"CHI",
+		"GreptimeHangzhouTeam",
+		"GreptimeBeijingTeam",
+		"GreptimeSilliconValleyTeam",
 	}
 	MachineOSChoices = []string{
-		"Ubuntu16.10",
-		"Ubuntu16.04LTS",
-		"Ubuntu15.10",
+		"Ubuntu-22.04-LTS-(Jammy-Jellyfish)-Greptime-Optimized-20260401",
+		"Ubuntu-24.04-LTS-(Noble-Numbat)-Greptime-Optimized-20260401",
+		"Ubuntu-26.04-LTS-(Resolute-Raccoon)-Greptime-Optimized-20260401",
 	}
 	MachineArchChoices = []string{
-		"x64",
-		"x86",
+		"aarch64",
+		"x86_64",
 	}
 	MachineServiceEnvironmentChoices = []string{
 		"production",
