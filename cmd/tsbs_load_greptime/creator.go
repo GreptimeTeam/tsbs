@@ -7,7 +7,8 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"time"
+	"net/url"
+	"strings"
 )
 
 type dbCreator struct {
@@ -34,102 +35,85 @@ func (d *dbCreator) DBExists(dbName string) bool {
 	}
 
 	for _, db := range dbs {
-		if db == loader.DatabaseName() {
+		if db == dbName {
 			return true
 		}
 	}
 	return false
 }
 
-func (d *dbCreator) listDatabases() ([]string, error) {
-	u := fmt.Sprintf("%s/v1/sql?sql=show%%20databases", d.daemonURL)
-	req, err := http.NewRequest("GET", u, nil)
+func (d *dbCreator) executeSQL(sql string) ([]byte, error) {
+	form := url.Values{}
+	form.Set("sql", sql)
+	req, err := http.NewRequest(
+		http.MethodPost,
+		strings.TrimRight(d.daemonURL, "/")+"/v1/sql",
+		strings.NewReader(form.Encode()),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("listDatabases error: %s", err.Error())
+		return nil, fmt.Errorf("create SQL request: %w", err)
 	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	d.addAuthHeader(req)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("listDatabases error: %s", err.Error())
+		return nil, fmt.Errorf("execute SQL %q: %w", sql, err)
 	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read response for SQL %q: %w", sql, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(
+			"execute SQL %q returned %s: %s",
+			sql,
+			resp.Status,
+			strings.TrimSpace(string(body)),
+		)
+	}
+	return body, nil
+}
+
+func (d *dbCreator) listDatabases() ([]string, error) {
+	body, err := d.executeSQL("SHOW DATABASES")
+	if err != nil {
+		return nil, fmt.Errorf("list databases: %w", err)
 	}
 
-	// Do ad-hoc parsing to find existing database names:
-	// {"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"Schemas","data_type":"String"}]},"rows":[["public"]]}}],"execution_time_ms":0}
 	type listingType struct {
 		Output []struct {
-			Rows [][]string
-		}
+			Records struct {
+				Rows [][]string `json:"rows"`
+			} `json:"records"`
+		} `json:"output"`
 	}
 	var listing listingType
-	err = json.Unmarshal(body, &listing)
-	if err != nil {
-		return nil, err
+	if err := json.Unmarshal(body, &listing); err != nil {
+		return nil, fmt.Errorf("decode database listing: %w", err)
+	}
+	if len(listing.Output) == 0 {
+		return nil, fmt.Errorf("decode database listing: response contains no output")
 	}
 
-	ret := []string{}
-	for _, nestedName := range listing.Output[0].Rows {
-		name := nestedName[0]
-		// the _internal database is skipped:
-		if name == "_internal" {
-			continue
+	databaseNames := make([]string, 0, len(listing.Output[0].Records.Rows))
+	for i, row := range listing.Output[0].Records.Rows {
+		if len(row) == 0 {
+			return nil, fmt.Errorf("decode database listing: row %d contains no database name", i)
 		}
-		ret = append(ret, name)
+		databaseNames = append(databaseNames, row[0])
 	}
-	return ret, nil
+	return databaseNames, nil
 }
 
 func (d *dbCreator) RemoveOldDB(dbName string) error {
-	u := fmt.Sprintf("%s/v1/sql?sql=drop+database+%s", d.daemonURL, dbName)
-	req, err := http.NewRequest("POST", u, nil)
-	if err != nil {
-		return fmt.Errorf("drop db error: %s", err.Error())
-	}
-	req.Header.Set("Content-Type", "text/plain")
-	d.addAuthHeader(req)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("drop db error: %s", err.Error())
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("drop db returned non-200 code: %d", resp.StatusCode)
-	}
-	time.Sleep(time.Second)
-	return nil
+	_, err := d.executeSQL(fmt.Sprintf("DROP DATABASE %s", dbName))
+	return err
 }
 
 func (d *dbCreator) CreateDB(dbName string) error {
-	u := fmt.Sprintf("%s/v1/sql?sql=create%%20database%%20%s", d.daemonURL, dbName)
-	req, err := http.NewRequest("GET", u, nil)
-	if err != nil {
-		return fmt.Errorf("create db error: %s", err.Error())
-	}
-	d.addAuthHeader(req)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("create db error: %s", err.Error())
-	}
-	defer resp.Body.Close()
-
-	// does the body need to be read into the void?
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("bad db create")
-	}
-
-	time.Sleep(time.Second)
-	return nil
+	_, err := d.executeSQL(fmt.Sprintf("CREATE DATABASE %s", dbName))
+	return err
 }
