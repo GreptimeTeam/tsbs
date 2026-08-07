@@ -14,6 +14,9 @@ func TestNewHTTP(t *testing.T) {
 		if got := len(q.Body); got != 0 {
 			t.Errorf("new query has non-0 body: got %d", got)
 		}
+		if got := len(q.RawQuery); got != 0 {
+			t.Errorf("new query has non-0 raw query: got %d", got)
+		}
 		if got := q.StartTimestamp; got != 0 {
 			t.Errorf("new query has non-0 start time: got %d", got)
 		}
@@ -28,6 +31,7 @@ func TestNewHTTP(t *testing.T) {
 	q.Method = []byte("POST")
 	q.Path = []byte("/home")
 	q.Body = []byte("bazbazbaz")
+	q.RawQuery = []byte("select 1")
 	q.StartTimestamp = 1
 	q.EndTimestamp = 5
 	q.SetID(1)

@@ -73,6 +73,7 @@ func (q *HTTP) Release() {
 	q.Method = q.Method[:0]
 	q.Path = q.Path[:0]
 	q.Body = q.Body[:0]
+	q.RawQuery = q.RawQuery[:0]
 	q.StartTimestamp = 0
 	q.EndTimestamp = 0
 

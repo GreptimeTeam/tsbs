@@ -10,6 +10,7 @@ import (
 	"github.com/timescale/tsbs/pkg/targets/crate"
 	"github.com/timescale/tsbs/pkg/targets/influx"
 	"github.com/timescale/tsbs/pkg/targets/influx2"
+	"github.com/timescale/tsbs/pkg/targets/influx3"
 	"github.com/timescale/tsbs/pkg/targets/mongo"
 	"github.com/timescale/tsbs/pkg/targets/prometheus"
 	"github.com/timescale/tsbs/pkg/targets/questdb"
@@ -48,6 +49,8 @@ func GetTarget(format string) targets.ImplementedTarget {
 		return questdb.NewTarget()
 	case constants.FormatInflux2:
 		return influx2.NewTarget()
+	case constants.FormatInflux3:
+		return influx3.NewTarget()
 	case constants.FormatGreptime:
 		// Reuses influx's target.
 		return influx.NewTarget()
