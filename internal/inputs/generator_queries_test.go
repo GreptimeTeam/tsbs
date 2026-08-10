@@ -17,6 +17,7 @@ import (
 	"github.com/timescale/tsbs/cmd/tsbs_generate_queries/databases/clickhouse"
 	"github.com/timescale/tsbs/cmd/tsbs_generate_queries/databases/cratedb"
 	"github.com/timescale/tsbs/cmd/tsbs_generate_queries/databases/influx"
+	"github.com/timescale/tsbs/cmd/tsbs_generate_queries/databases/influx3"
 	"github.com/timescale/tsbs/cmd/tsbs_generate_queries/databases/mongo"
 	"github.com/timescale/tsbs/cmd/tsbs_generate_queries/databases/questdb"
 	"github.com/timescale/tsbs/cmd/tsbs_generate_queries/databases/siridb"
@@ -285,6 +286,13 @@ func TestGetUseCaseGenerator(t *testing.T) {
 		t.Fatalf("Error creating influx query generator")
 	}
 	checkType(constants.FormatInflux, indb)
+
+	bi3 := influx3.BaseGenerator{}
+	indb3, err := bi3.NewDevops(tsStart, tsEnd, scale)
+	if err != nil {
+		t.Fatalf("Error creating influx3 query generator")
+	}
+	checkType(constants.FormatInflux3, indb3)
 
 	bs := siridb.BaseGenerator{}
 	siri, err := bs.NewDevops(tsStart, tsEnd, scale)

@@ -14,8 +14,9 @@ const (
 	FormatVictoriaMetrics = "victoriametrics"
 	FormatTimestream      = "timestream"
 	FormatQuestDB         = "questdb"
-	FormatInflux2          = "influx2"
-	FormatGreptime          = "greptime"
+	FormatInflux2         = "influx2"
+	FormatInflux3         = "influx3"
+	FormatGreptime        = "greptime"
 )
 
 func SupportedFormats() []string {
@@ -33,6 +34,7 @@ func SupportedFormats() []string {
 		FormatTimestream,
 		FormatQuestDB,
 		FormatInflux2,
+		FormatInflux3,
 		FormatGreptime,
 	}
 }
