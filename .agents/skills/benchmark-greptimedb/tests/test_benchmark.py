@@ -89,6 +89,27 @@ wall clock time: 1.0sec
             self.assertEqual(query["query_count"], 8)
             self.assertEqual(query["weighted_mean_milliseconds"], 3.5)
 
+    def test_summary_includes_dataset_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            manifest = {
+                "run_id": "test",
+                "profile": "smoke",
+                "database": "benchmark",
+                "dataset": {
+                    "dataset_id": "cpu-only-s10-abc",
+                    "format": "influx",
+                    "data_path": "/cache/data",
+                    "sha256": "1234",
+                },
+                "events": {"loads": [], "queries": []},
+            }
+            summary = summarize.build_summary(run_dir, manifest)
+            self.assertEqual(summary["dataset"]["dataset_id"], "cpu-only-s10-abc")
+            markdown = summarize.render_markdown(summary)
+            self.assertIn("cpu-only-s10-abc", markdown)
+            self.assertIn("1234", markdown)
+
 
 class RunnerSafetyTests(unittest.TestCase):
     def test_database_modes(self) -> None:
@@ -143,6 +164,55 @@ class RunnerSafetyTests(unittest.TestCase):
             run_dir = Path(temp)
             benchmark.save_manifest(run_dir, {"run_id": "test"})
             self.assertEqual(json.loads((run_dir / "manifest.json").read_text())["run_id"], "test")
+
+    def test_pinned_dataset_rejects_conflicting_selection(self) -> None:
+        args = benchmark.make_parser().parse_args(
+            ["generate", "--only", "data", "--dataset-id", "different"]
+        )
+        manifest = {
+            "dataset": {
+                "dataset_id": "pinned",
+                "dataset_path": "/tmp/pinned",
+            }
+        }
+        with self.assertRaisesRegex(benchmark.BenchmarkError, "conflicts"):
+            benchmark.dataset_selection_args(args, manifest)
+
+    def test_pinned_dataset_path_is_reused(self) -> None:
+        args = benchmark.make_parser().parse_args(["generate", "--only", "data"])
+        manifest = {
+            "dataset": {
+                "dataset_id": "pinned",
+                "dataset_path": "/tmp/pinned",
+            }
+        }
+        self.assertEqual(
+            benchmark.dataset_selection_args(args, manifest),
+            ["--dataset-path", str(Path("/tmp/pinned").resolve())],
+        )
+
+    def test_changed_pinned_dataset_checksum_is_rejected(self) -> None:
+        manifest = {"dataset": {"sha256": "old"}}
+        dataset = {"sha256": "new", "spec": {"use_case": "cpu-only"}}
+        with self.assertRaisesRegex(benchmark.BenchmarkError, "checksum changed"):
+            benchmark.validate_dataset_result(manifest, dataset, False)
+        benchmark.validate_dataset_result(manifest, dataset, True)
+
+    def test_legacy_run_local_data_is_still_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            (run_dir / "data").mkdir()
+            legacy = run_dir / "data" / "influx-data.lp"
+            legacy.write_text("cpu value=1 1\n", encoding="utf-8")
+            manifest = {
+                "run_id": "legacy",
+                "workload": {},
+                "events": {"loads": [], "queries": []},
+            }
+            args = benchmark.make_parser().parse_args(["generate", "--only", "data"])
+            self.assertEqual(benchmark.generate_data(args, run_dir, manifest), legacy)
+            saved = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["generated_data"], "data/influx-data.lp")
 
     def test_build_marker_does_not_trust_an_untracked_binary(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

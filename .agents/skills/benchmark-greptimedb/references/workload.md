@@ -6,6 +6,11 @@ Both profiles use seed `123`, a `10s` data interval, the `cpu-only` data use
 case, the `devops` query use case, Influx line protocol input, and GreptimeDB
 query format.
 
+Data is resolved through `$generate-tsbs-data` and normally lives under
+`.benchmarks/datasets/<dataset-id>/formats/influx/data`. The run manifest pins
+the dataset path and SHA-256 checksum. GreptimeDB and InfluxDB 3 may consume the
+same `influx` format variant; their query inputs remain database-specific.
+
 | Setting | `manual` (default) | `smoke` |
 | --- | --- | --- |
 | Start | `2023-06-11T00:00:00Z` | `2023-06-11T00:00:00Z` |

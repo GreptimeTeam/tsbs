@@ -133,6 +133,7 @@ def build_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         "run_id": manifest.get("run_id", run_dir.name),
         "profile": manifest.get("profile"),
         "database": manifest.get("database"),
+        "dataset": manifest.get("dataset"),
         "workload": manifest.get("workload", {}),
         "ingestion_runs": ingestion_runs,
         "queries": queries,
@@ -146,10 +147,18 @@ def render_markdown(summary: dict[str, Any]) -> str:
         "",
         f"- Profile: `{summary.get('profile')}`",
         f"- Database: `{summary.get('database')}`",
-        "",
-        "## Ingestion",
-        "",
     ]
+    dataset = summary.get("dataset")
+    if dataset:
+        lines.extend(
+            [
+                f"- Dataset: `{dataset.get('dataset_id')}`",
+                f"- Data format: `{dataset.get('format')}`",
+                f"- Data SHA-256: `{dataset.get('sha256')}`",
+                f"- Data path: `{dataset.get('data_path')}`",
+            ]
+        )
+    lines.extend(["", "## Ingestion", ""])
     if summary["ingestion_runs"]:
         lines.extend(
             [

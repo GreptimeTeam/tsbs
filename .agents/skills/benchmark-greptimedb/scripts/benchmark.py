@@ -25,6 +25,7 @@ from summarize import write_summary
 SCRIPT_PATH = Path(__file__).resolve()
 REPO_ROOT = SCRIPT_PATH.parents[4]
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / ".benchmarks" / "greptimedb"
+DATASET_RUNNER = REPO_ROOT / ".agents" / "skills" / "generate-tsbs-data" / "scripts" / "generate.py"
 
 QUERY_COUNTS_MANUAL = {
     "cpu-max-all-1": 100,
@@ -71,7 +72,6 @@ PROFILES = {
 }
 
 BINARIES = {
-    "data": "tsbs_generate_data",
     "queries": "tsbs_generate_queries",
     "load": "tsbs_load_greptime",
     "query": "tsbs_run_queries_influx",
@@ -229,34 +229,115 @@ def ensure_binaries(run_dir: Path, stages: Sequence[str], rebuild: bool) -> None
         BUILT_THIS_PROCESS.add(name)
 
 
-def data_path(run_dir: Path) -> Path:
-    return run_dir / "data" / "influx-data.lp"
-
-
 def query_path(run_dir: Path, query_type: str) -> Path:
     return run_dir / "queries" / f"greptime-queries-{query_type}.dat"
 
 
-def generate_data(run_dir: Path, manifest: dict[str, Any], regenerate: bool, rebuild: bool) -> None:
-    output = data_path(run_dir)
-    if output.exists() and not regenerate:
-        print(f"Reusing generated data: {output}")
-        return
-    ensure_binaries(run_dir, ["data"], rebuild)
+def dataset_selection_args(
+    args: argparse.Namespace,
+    manifest: dict[str, Any],
+) -> list[str]:
+    pinned = manifest.get("dataset")
+    if pinned:
+        pinned_path = Path(pinned["dataset_path"]).resolve()
+        if args.dataset_path and args.dataset_path.resolve() != pinned_path:
+            raise BenchmarkError("--dataset-path conflicts with the dataset pinned by this run")
+        if args.dataset_id and args.dataset_id != pinned["dataset_id"]:
+            raise BenchmarkError("--dataset-id conflicts with the dataset pinned by this run")
+        return ["--dataset-path", str(pinned_path)]
+    if args.dataset_path:
+        return ["--dataset-path", str(args.dataset_path.resolve())]
+    result: list[str] = []
+    if args.dataset_root:
+        result.extend(["--dataset-root", str(args.dataset_root.resolve())])
+    if args.dataset_id:
+        result.extend(["--dataset-id", args.dataset_id])
+    return result
+
+
+def validate_dataset_result(
+    manifest: dict[str, Any],
+    dataset: dict[str, Any],
+    regenerate: bool,
+) -> None:
+    if dataset["spec"]["use_case"] != "cpu-only":
+        raise BenchmarkError("GreptimeDB benchmark requires a cpu-only dataset")
+    pinned = manifest.get("dataset")
+    if pinned and pinned.get("sha256") != dataset.get("sha256") and not regenerate:
+        raise BenchmarkError(
+            "the pinned dataset checksum changed; use --regenerate only if replacement was intentional"
+        )
+
+
+def generate_data(
+    args: argparse.Namespace,
+    run_dir: Path,
+    manifest: dict[str, Any],
+) -> Path:
+    legacy = run_dir / "data" / "influx-data.lp"
+    if legacy.exists() and not manifest.get("dataset") and not (
+        args.dataset_root or args.dataset_id or args.dataset_path or args.regenerate
+    ):
+        print(f"Reusing legacy generated data: {legacy}")
+        manifest["generated_data"] = relative(run_dir, legacy)
+        save_manifest(run_dir, manifest)
+        return legacy
+
     workload = manifest["workload"]
+    selecting_unpinned = not manifest.get("dataset") and bool(args.dataset_id or args.dataset_path)
+    result_path = run_dir / "results" / "dataset.json"
     command = [
-        str(REPO_ROOT / "bin" / BINARIES["data"]),
-        "--use-case=cpu-only",
-        f"--seed={workload['seed']}",
-        f"--scale={workload['scale']}",
-        f"--timestamp-start={workload['start']}",
-        f"--timestamp-end={workload['end']}",
-        f"--log-interval={workload['log_interval']}",
-        "--format=influx",
+        sys.executable,
+        str(DATASET_RUNNER),
+        "generate",
+        "--format",
+        "influx",
+        "--use-case",
+        "cpu-only",
+        "--result-file",
+        str(result_path),
+        *dataset_selection_args(args, manifest),
     ]
-    run_tee(command, run_dir / "logs" / "generate-data.log", stdout_path=output)
-    manifest["generated_data"] = relative(run_dir, output)
+    if selecting_unpinned:
+        if args.profile:
+            command.extend(["--profile", args.profile])
+        for option, value in (
+            ("--seed", args.seed),
+            ("--scale", args.scale),
+            ("--start", args.start),
+            ("--end", args.end),
+            ("--log-interval", args.log_interval),
+        ):
+            if value is not None:
+                command.extend([option, str(value)])
+    else:
+        command.extend(
+            [
+                "--seed",
+                str(workload["seed"]),
+                "--scale",
+                str(workload["scale"]),
+                "--start",
+                workload["start"],
+                "--end",
+                workload["end"],
+                "--log-interval",
+                workload["log_interval"],
+            ]
+        )
+    if args.regenerate:
+        command.append("--regenerate")
+    if args.rebuild:
+        command.append("--rebuild")
+    run_tee(command, run_dir / "logs" / "generate-data.log")
+    dataset = json.loads(result_path.read_text(encoding="utf-8"))
+    validate_dataset_result(manifest, dataset, args.regenerate)
+    for name in ("start", "end", "scale", "seed", "log_interval"):
+        workload[name] = dataset["spec"][name]
+    manifest["dataset"] = dataset
+    manifest["generated_data"] = dataset["data_path"]
     save_manifest(run_dir, manifest)
+    return Path(dataset["data_path"])
 
 
 def generate_queries(
@@ -315,7 +396,7 @@ def load_data(
     endpoint: str,
     managed: bool,
 ) -> None:
-    generate_data(run_dir, manifest, args.regenerate, args.rebuild)
+    input_path = generate_data(args, run_dir, manifest)
     ensure_binaries(run_dir, ["load"], args.rebuild)
     mode = args.database_mode or ("create" if managed else None)
     if mode is None:
@@ -337,7 +418,7 @@ def load_data(
     command = [
         str(REPO_ROOT / "bin" / BINARIES["load"]),
         f"--urls={endpoint}",
-        f"--file={data_path(run_dir)}",
+        f"--file={input_path}",
         f"--db-name={args.database}",
         f"--batch-size={workload['batch_size']}",
         "--gzip=false",
@@ -501,6 +582,10 @@ def add_run_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--query-type", action="append", choices=QUERY_TYPES)
     parser.add_argument("--regenerate", action="store_true")
     parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument("--dataset-root", type=Path)
+    dataset = parser.add_mutually_exclusive_group()
+    dataset.add_argument("--dataset-id")
+    dataset.add_argument("--dataset-path", type=Path)
 
 
 def add_connection_options(parser: argparse.ArgumentParser) -> None:
@@ -520,7 +605,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    build = subparsers.add_parser("build", help="build the four GreptimeDB TSBS tools")
+    build = subparsers.add_parser("build", help="build the three GreptimeDB-specific TSBS tools")
     build.add_argument("--run-dir", type=Path)
     build.add_argument("--rebuild", action="store_true")
 
@@ -594,7 +679,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         query_types = args.query_type or list(QUERY_TYPES)
         if args.command == "generate":
             if args.only in ("all", "data"):
-                generate_data(run_dir, manifest, args.regenerate, args.rebuild)
+                generate_data(args, run_dir, manifest)
             if args.only in ("all", "queries"):
                 generate_queries(run_dir, manifest, query_types, args.regenerate, args.rebuild)
         elif args.command in ("load", "query", "all"):

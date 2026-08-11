@@ -1,13 +1,14 @@
 ---
 name: benchmark-greptimedb
-description: Run repeatable GreptimeDB benchmarks with TSBS, including targeted TSBS builds, data and query generation, ingestion, individual or repeated query workloads, isolated local GreptimeDB lifecycle management, external endpoint testing, durable logs, and ingestion/query summaries. Use for GreptimeDB performance tests, TSBS smoke tests, ingestion-rate measurements, query-latency comparisons, or rerunning selected TSBS queries against an existing database.
+description: Run repeatable GreptimeDB benchmarks with TSBS, including shared dataset reuse, targeted TSBS builds, query generation, ingestion, individual or repeated query workloads, isolated local GreptimeDB lifecycle management, external endpoint testing, durable logs, and ingestion/query summaries. Use for GreptimeDB performance tests, TSBS smoke tests, ingestion-rate measurements, query-latency comparisons, or rerunning selected TSBS queries against an existing database.
 ---
 
 # Benchmark GreptimeDB
 
 Use the bundled runner for deterministic execution and log parsing. Read
 `references/workload.md` when selecting workload sizes, query types, or database
-modes.
+modes. Use `$generate-tsbs-data` for standalone data generation, cache
+inspection, or non-Greptime serialization formats.
 
 ## Collect required inputs
 
@@ -30,6 +31,9 @@ Invoke `scripts/benchmark.py` from the repository root. Examples:
 python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py all \
   --profile smoke --greptime-bin /absolute/path/to/greptime
 
+python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py generate \
+  --profile smoke --only data --dataset-root /shared/tsbs-data
+
 python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py load \
   --run-dir .benchmarks/greptimedb/RUN_ID \
   --endpoint http://127.0.0.1:4000 --database benchmark \
@@ -45,7 +49,8 @@ python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py summarize \
 ```
 
 Repeat `--query-type` to select multiple query types. Use `--regenerate` only
-when intentionally replacing generated data or query input. Use `--rebuild`
+when intentionally replacing a shared data variant or query input. Use
+`--dataset-id` or `--dataset-path` to pin a reusable dataset. Use `--rebuild`
 only when existing TSBS binaries must be rebuilt.
 
 ## Protect databases
@@ -66,7 +71,8 @@ After a run, read `summary.md` and report:
 
 - metrics/second and rows/second for every ingestion attempt;
 - weighted mean latency in milliseconds for every query type;
-- failed or unparsable attempts and their log paths; and
+- failed or unparsable attempts and their log paths;
+- the dataset ID and checksum; and
 - the run directory so the user can inspect raw logs and `summary.json`.
 
 Never discard failed-run artifacts. Managed mode stops only the process it
