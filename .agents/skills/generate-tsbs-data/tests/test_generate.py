@@ -119,6 +119,28 @@ class DatasetVariantTests(unittest.TestCase):
             self.assertEqual(data_path.read_bytes(), old_data)
             self.assertEqual(manifest_path.read_bytes(), old_manifest)
 
+    def test_failed_initial_generation_can_be_retried_without_regenerate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bad = self.make_generator(root, "import sys\nprint('partial')\nraise SystemExit(2)\n")
+            dataset_dir, manifest = self.prepare(root)
+            with mock.patch.object(generate, "GENERATOR", bad):
+                with self.assertRaises(generate.DatasetError):
+                    generate.generate_variant(dataset_dir, manifest, "influx", regenerate=False, rebuild=False)
+            manifest_path = dataset_dir / "formats" / "influx" / "manifest.json"
+            failed = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(failed["status"], "failed")
+
+            good = self.make_generator(root, "print('complete')\n")
+            with mock.patch.object(generate, "GENERATOR", good):
+                retried = generate.generate_variant(
+                    dataset_dir, manifest, "influx", regenerate=False, rebuild=False
+                )
+            self.assertFalse(retried["reused"])
+            self.assertTrue(Path(retried["data_path"]).is_file())
+            completed = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(completed["status"], "completed")
+
     def test_list_and_verify_report_variants(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

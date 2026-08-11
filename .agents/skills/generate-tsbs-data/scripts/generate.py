@@ -215,10 +215,12 @@ def generate_variant(
     artifact = variant_dir / "data"
     manifest_path = variant_dir / "manifest.json"
     if manifest_path.exists() and not regenerate:
-        if rebuild:
-            run_build(log_path, True)
-        manifest = validate_variant(dataset_dir, format_name)
-        return result(dataset_dir, dataset_manifest, manifest, reused=True)
+        existing = read_json(manifest_path)
+        if existing.get("status") == "completed":
+            if rebuild:
+                run_build(log_path, True)
+            manifest = validate_variant(dataset_dir, format_name)
+            return result(dataset_dir, dataset_manifest, manifest, reused=True)
 
     variant_dir.mkdir(parents=True, exist_ok=True)
     run_build(log_path, rebuild)

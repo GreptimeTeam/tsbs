@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -242,6 +243,125 @@ class RunnerSafetyTests(unittest.TestCase):
             self.assertFalse((root / "generated.dat.tmp").exists())
             benchmark.run_tee([sys.executable, "-c", "print('new')"], log, stdout_path=output)
             self.assertEqual(output.read_text(), "new\n")
+
+    def test_queries_are_reused_only_for_matching_generation_spec(self) -> None:
+        query_type = "cpu-max-all-1"
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            (run_dir / "queries").mkdir()
+            (run_dir / "logs").mkdir()
+            output = benchmark.query_path(run_dir, query_type)
+            output.write_text("existing\n", encoding="utf-8")
+            workload = json.loads(json.dumps(benchmark.PROFILES["smoke"]))
+            manifest = {
+                "workload": workload,
+                "query_generation_specs": {
+                    query_type: benchmark.query_generation_spec(workload, query_type),
+                },
+            }
+            with (
+                mock.patch.object(benchmark, "ensure_binaries"),
+                mock.patch.object(benchmark, "run_tee") as run_tee,
+            ):
+                benchmark.generate_queries(run_dir, manifest, [query_type], False, False)
+            run_tee.assert_not_called()
+            self.assertEqual(output.read_text(encoding="utf-8"), "existing\n")
+
+    def test_workload_changes_regenerate_queries_and_update_spec(self) -> None:
+        query_type = "cpu-max-all-1"
+        changes = {
+            "seed": 456,
+            "scale": 20,
+            "start": "2023-06-10T00:00:00Z",
+            "end": "2023-06-13T00:00:00Z",
+            "query_count": 11,
+        }
+        for field, value in changes.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
+                run_dir = Path(temp)
+                (run_dir / "queries").mkdir()
+                (run_dir / "logs").mkdir()
+                output = benchmark.query_path(run_dir, query_type)
+                output.write_text("stale\n", encoding="utf-8")
+                workload = json.loads(json.dumps(benchmark.PROFILES["smoke"]))
+                old_spec = benchmark.query_generation_spec(workload, query_type)
+                if field == "query_count":
+                    workload["query_counts"][query_type] = value
+                else:
+                    workload[field] = value
+                manifest = {
+                    "workload": workload,
+                    "query_generation_specs": {query_type: old_spec},
+                }
+
+                def write_generated(_command, _log_path, *, stdout_path, **_kwargs):
+                    stdout_path.write_text("fresh\n", encoding="utf-8")
+
+                with (
+                    mock.patch.object(benchmark, "ensure_binaries"),
+                    mock.patch.object(benchmark, "run_tee", side_effect=write_generated) as run_tee,
+                ):
+                    benchmark.generate_queries(run_dir, manifest, [query_type], False, False)
+                run_tee.assert_called_once()
+                self.assertEqual(output.read_text(encoding="utf-8"), "fresh\n")
+                expected = benchmark.query_generation_spec(workload, query_type)
+                self.assertEqual(manifest["query_generation_specs"][query_type], expected)
+                saved = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+                self.assertEqual(saved["query_generation_specs"][query_type], expected)
+
+    def test_legacy_query_without_generation_spec_is_regenerated(self) -> None:
+        query_type = "cpu-max-all-1"
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            (run_dir / "queries").mkdir()
+            (run_dir / "logs").mkdir()
+            output = benchmark.query_path(run_dir, query_type)
+            output.write_text("legacy\n", encoding="utf-8")
+            workload = json.loads(json.dumps(benchmark.PROFILES["smoke"]))
+            manifest = {"workload": workload}
+
+            def write_generated(_command, _log_path, *, stdout_path, **_kwargs):
+                stdout_path.write_text("fresh\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(benchmark, "ensure_binaries"),
+                mock.patch.object(benchmark, "run_tee", side_effect=write_generated) as run_tee,
+            ):
+                benchmark.generate_queries(run_dir, manifest, [query_type], False, False)
+            run_tee.assert_called_once()
+            self.assertEqual(output.read_text(encoding="utf-8"), "fresh\n")
+            self.assertEqual(
+                manifest["query_generation_specs"][query_type],
+                benchmark.query_generation_spec(workload, query_type),
+            )
+
+    def test_failed_query_regeneration_preserves_previous_spec(self) -> None:
+        query_type = "cpu-max-all-1"
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            (run_dir / "queries").mkdir()
+            (run_dir / "logs").mkdir()
+            output = benchmark.query_path(run_dir, query_type)
+            output.write_text("existing\n", encoding="utf-8")
+            workload = json.loads(json.dumps(benchmark.PROFILES["smoke"]))
+            previous_spec = benchmark.query_generation_spec(workload, query_type)
+            workload["scale"] = 20
+            manifest = {
+                "workload": workload,
+                "query_generation_specs": {query_type: previous_spec},
+            }
+            with (
+                mock.patch.object(benchmark, "ensure_binaries"),
+                mock.patch.object(
+                    benchmark,
+                    "run_tee",
+                    side_effect=benchmark.BenchmarkError("generation failed"),
+                ),
+            ):
+                with self.assertRaises(benchmark.BenchmarkError):
+                    benchmark.generate_queries(run_dir, manifest, [query_type], False, False)
+            self.assertEqual(output.read_text(encoding="utf-8"), "existing\n")
+            self.assertEqual(manifest["query_generation_specs"][query_type], previous_spec)
 
 
 if __name__ == "__main__":

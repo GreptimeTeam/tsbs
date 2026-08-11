@@ -233,6 +233,19 @@ def query_path(run_dir: Path, query_type: str) -> Path:
     return run_dir / "queries" / f"greptime-queries-{query_type}.dat"
 
 
+def query_generation_spec(workload: dict[str, Any], query_type: str) -> dict[str, Any]:
+    return {
+        "use_case": "devops",
+        "seed": workload["seed"],
+        "scale": workload["scale"],
+        "timestamp_start": workload["start"],
+        "timestamp_end": add_one_second(workload["end"]),
+        "queries": workload["query_counts"][query_type],
+        "query_type": query_type,
+        "format": "greptime",
+    }
+
+
 def dataset_selection_args(
     args: argparse.Namespace,
     manifest: dict[str, Any],
@@ -349,23 +362,27 @@ def generate_queries(
 ) -> None:
     ensure_binaries(run_dir, ["queries"], rebuild)
     workload = manifest["workload"]
+    generation_specs = manifest.setdefault("query_generation_specs", {})
     for query_type in query_types:
         output = query_path(run_dir, query_type)
-        if output.exists() and not regenerate:
+        spec = query_generation_spec(workload, query_type)
+        if output.exists() and generation_specs.get(query_type) == spec and not regenerate:
             print(f"Reusing generated queries: {output}")
             continue
         command = [
             str(REPO_ROOT / "bin" / BINARIES["queries"]),
-            "--use-case=devops",
-            f"--seed={workload['seed']}",
-            f"--scale={workload['scale']}",
-            f"--timestamp-start={workload['start']}",
-            f"--timestamp-end={add_one_second(workload['end'])}",
-            f"--queries={workload['query_counts'][query_type]}",
-            f"--query-type={query_type}",
-            "--format=greptime",
+            f"--use-case={spec['use_case']}",
+            f"--seed={spec['seed']}",
+            f"--scale={spec['scale']}",
+            f"--timestamp-start={spec['timestamp_start']}",
+            f"--timestamp-end={spec['timestamp_end']}",
+            f"--queries={spec['queries']}",
+            f"--query-type={spec['query_type']}",
+            f"--format={spec['format']}",
         ]
         run_tee(command, run_dir / "logs" / f"generate-query-{query_type}.log", stdout_path=output)
+        generation_specs[query_type] = spec
+        save_manifest(run_dir, manifest)
     manifest["generated_query_types"] = sorted(
         query_type for query_type in QUERY_TYPES if query_path(run_dir, query_type).exists()
     )
