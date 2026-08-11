@@ -215,6 +215,11 @@ func generateQuantileMap(hist *hdrhistogram.Histogram) (int64, map[string]float6
 	return ops, mp
 }
 
+type queryStatSummary struct {
+	Count            int64   `json:"count"`
+	MeanMilliseconds float64 `json:"meanMilliseconds"`
+}
+
 func (sp *defaultStatProcessor) GetTotalsMap() map[string]interface{} {
 	totals := make(map[string]interface{})
 	// PrewarmQueries tells the StatProcessor whether we're running each query twice to prewarm the cache
@@ -231,6 +236,20 @@ func (sp *defaultStatProcessor) GetTotalsMap() map[string]interface{} {
 		queryRates[stripRegex(label)] = overallQueryRate
 	}
 	totals["overallQueryRates"] = queryRates
+	// Include exact counts and mean latencies so result consumers do not need
+	// to parse the human-readable summary.
+	overallStats := make(map[string]queryStatSummary)
+	for label, statGroup := range sp.statMapping {
+		mean := 0.0
+		if statGroup.count > 0 {
+			mean = statGroup.Mean()
+		}
+		overallStats[stripRegex(label)] = queryStatSummary{
+			Count:            statGroup.count,
+			MeanMilliseconds: mean,
+		}
+	}
+	totals["overallStats"] = overallStats
 	// calculate overall quantiles
 	quantiles := make(map[string]interface{})
 	for label, statGroup := range sp.statMapping {

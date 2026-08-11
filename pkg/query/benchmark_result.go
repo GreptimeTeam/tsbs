@@ -1,6 +1,6 @@
 package query
 
-const BenchmarkTestResultVersion = "0.1"
+const BenchmarkTestResultVersion = "0.2"
 
 // LoaderTestResult aggregates the results of an query benchmark in a common format across targets
 type LoaderTestResult struct {
@@ -11,7 +11,7 @@ type LoaderTestResult struct {
 	RunnerConfig BenchmarkRunnerConfig `json:"RunnerConfig"`
 
 	// Run info
-	StartTime      int64 `json:"StartTime`
+	StartTime      int64 `json:"StartTime"`
 	EndTime        int64 `json:"EndTime"`
 	DurationMillis int64 `json:"DurationMillis"`
 

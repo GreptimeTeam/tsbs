@@ -2,14 +2,51 @@ package load
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
-	"github.com/timescale/tsbs/pkg/targets"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/timescale/tsbs/pkg/targets"
 )
+
+func TestSaveTestResultIncludesStructuredTotals(t *testing.T) {
+	for _, rows := range []uint64{0, 40} {
+		t.Run(fmt.Sprintf("rows-%d", rows), func(t *testing.T) {
+			resultPath := filepath.Join(t.TempDir(), "result.json")
+			loader := CommonBenchmarkRunner{
+				BenchmarkRunnerConfig: BenchmarkRunnerConfig{ResultsFile: resultPath},
+				metricCnt:             200,
+				rowCnt:                rows,
+			}
+			start := time.Unix(100, 0)
+			loader.saveTestResult(2*time.Second, start, start.Add(2*time.Second), 100, float64(rows)/2)
+
+			contents, err := os.ReadFile(resultPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var result LoaderTestResult
+			if err := json.Unmarshal(contents, &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.ResultFormatVersion != "0.2" {
+				t.Fatalf("unexpected result version %q", result.ResultFormatVersion)
+			}
+			if result.Totals["metricCount"] != float64(200) || result.Totals["metricRate"] != float64(100) {
+				t.Fatalf("unexpected metric totals: %#v", result.Totals)
+			}
+			if result.Totals["rowCount"] != float64(rows) || result.Totals["rowRate"] != float64(rows)/2 {
+				t.Fatalf("unexpected row totals: %#v", result.Totals)
+			}
+		})
+	}
+}
 
 type testProcessor struct {
 	worker int

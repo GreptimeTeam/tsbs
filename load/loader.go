@@ -153,10 +153,10 @@ func (l *CommonBenchmarkRunner) postRun(wg *sync.WaitGroup, start *time.Time) {
 
 func (l *CommonBenchmarkRunner) saveTestResult(took time.Duration, start time.Time, end time.Time, metricRate, rowRate float64) {
 	totals := make(map[string]interface{})
+	totals["metricCount"] = l.metricCnt
 	totals["metricRate"] = metricRate
-	if l.rowCnt > 0 {
-		totals["rowRate"] = rowRate
-	}
+	totals["rowCount"] = l.rowCnt
+	totals["rowRate"] = rowRate
 
 	testResult := LoaderTestResult{
 		ResultFormatVersion: LoaderTestResultVersion,
