@@ -1,0 +1,4 @@
+interface:
+  display_name: "Setup InfluxDB 3"
+  short_description: "Install and prepare local InfluxDB 3"
+  default_prompt: "Use $setup-influxdb3 to install and prepare a local InfluxDB 3 Core or Enterprise instance."
