@@ -5,7 +5,7 @@ description: Run repeatable GreptimeDB TSBS benchmarks with shared datasets, com
 
 # Benchmark GreptimeDB
 
-Use `scripts/benchmark.py` for execution and log parsing. Read
+Use `scripts/benchmark.py` for execution and structured result parsing. Read
 `references/workload.md` before selecting workload sizes, query types, database
 modes, or shared workspace identifiers. Use `$generate-tsbs-data` for standalone
 dataset generation, inspection, or non-Greptime serialization formats.
@@ -66,7 +66,7 @@ size, and checksum validation.
 
 ## Report results
 
-Read `summary.md` and report the dataset ID and checksum, query-set ID and
+Read `summary.json` and report the dataset ID and checksum, query-set ID and
 manifest checksum, database ID or external target, metrics/second and
 rows/second for ingestion, weighted mean latency per query type, failures and
 their log paths, and the run directory. Preserve failed-run diagnostics.

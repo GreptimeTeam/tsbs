@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Parse TSBS logs and write GreptimeDB benchmark summaries."""
+"""Parse TSBS results and write GreptimeDB benchmark summaries."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+
+RESULT_FORMAT_VERSION = "0.2"
+LEGACY_RESULT_FORMAT_VERSION = "0.1"
 
 
 METRIC_RE = re.compile(
@@ -26,7 +31,61 @@ QUERY_RE = re.compile(
 
 
 class SummaryError(ValueError):
-    """Raised when a completed TSBS log cannot be parsed."""
+    """Raised when a completed TSBS result or legacy log cannot be parsed."""
+
+
+def _mapping(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise SummaryError(f"result field {field} must be an object")
+    return value
+
+
+def _number(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SummaryError(f"result field {field} must be a number")
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise SummaryError(f"result field {field} must be a non-negative finite number")
+    return result
+
+
+def _count(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise SummaryError(f"result field {field} must be a non-negative integer")
+    return value
+
+
+def parse_load_result(result: dict[str, Any]) -> dict[str, Any]:
+    totals = _mapping(result.get("Totals"), "Totals")
+    metrics = _count(totals.get("metricCount"), "Totals.metricCount")
+    metric_rate = _number(totals.get("metricRate"), "Totals.metricRate")
+    rows = _count(totals.get("rowCount"), "Totals.rowCount")
+    row_rate = _number(totals.get("rowRate"), "Totals.rowRate")
+    parsed: dict[str, Any] = {
+        "metrics": metrics,
+        "duration_seconds": _number(result.get("DurationMillis"), "DurationMillis") / 1000.0,
+        "metrics_per_second": metric_rate,
+    }
+    if rows > 0:
+        parsed.update({"rows": rows, "rows_per_second": row_rate})
+    return parsed
+
+
+def parse_query_result(result: dict[str, Any]) -> dict[str, Any]:
+    totals = _mapping(result.get("Totals"), "Totals")
+    overall_stats = _mapping(totals.get("overallStats"), "Totals.overallStats")
+    all_queries = _mapping(
+        overall_stats.get("all_queries"), "Totals.overallStats.all_queries"
+    )
+    return {
+        "mean_milliseconds": _number(
+            all_queries.get("meanMilliseconds"),
+            "Totals.overallStats.all_queries.meanMilliseconds",
+        ),
+        "count": _count(
+            all_queries.get("count"), "Totals.overallStats.all_queries.count"
+        ),
+    }
 
 
 def parse_load_log(text: str) -> dict[str, Any]:
@@ -69,6 +128,36 @@ def _read_log(run_dir: Path, relative_path: str) -> str:
     return (run_dir / relative_path).read_text(encoding="utf-8", errors="replace")
 
 
+def _read_event_result(run_dir: Path, event: dict[str, Any]) -> dict[str, Any] | None:
+    relative_path = event.get("results")
+    if not relative_path:
+        return None
+    path = run_dir / relative_path
+    try:
+        result = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SummaryError(f"malformed result JSON {relative_path}: {exc}") from exc
+    result = _mapping(result, str(relative_path))
+    version = result.get("ResultFormatVersion")
+    if version == LEGACY_RESULT_FORMAT_VERSION:
+        return None
+    if version != RESULT_FORMAT_VERSION:
+        raise SummaryError(f"unsupported result format version {version!r} in {relative_path}")
+    return result
+
+
+def _parse_event(
+    run_dir: Path,
+    event: dict[str, Any],
+    result_parser: Callable[[dict[str, Any]], dict[str, Any]],
+    log_parser: Callable[[str], dict[str, Any]],
+) -> dict[str, Any]:
+    result = _read_event_result(run_dir, event)
+    if result is not None:
+        return result_parser(result)
+    return log_parser(_read_log(run_dir, event["log"]))
+
+
 def build_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     failures: list[dict[str, str]] = []
     ingestion_runs: list[dict[str, Any]] = []
@@ -89,7 +178,7 @@ def build_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             )
             continue
         try:
-            base.update(parse_load_log(_read_log(run_dir, event["log"])))
+            base.update(_parse_event(run_dir, event, parse_load_result, parse_load_log))
             ingestion_runs.append(base)
         except (OSError, SummaryError) as exc:
             failures.append({"stage": "load", "log": event["log"], "reason": str(exc)})
@@ -107,7 +196,7 @@ def build_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             )
             continue
         try:
-            base.update(parse_query_log(_read_log(run_dir, event["log"])))
+            base.update(_parse_event(run_dir, event, parse_query_result, parse_query_log))
             query_runs.append(base)
         except (OSError, SummaryError) as exc:
             failures.append({"stage": "query", "log": event["log"], "reason": str(exc)})

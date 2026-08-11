@@ -17,6 +17,11 @@ import summarize  # noqa: E402
 
 
 class SummaryTests(unittest.TestCase):
+    def write_json(self, root: Path, relative: str, value: dict) -> None:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value), encoding="utf-8")
+
     def test_reused_load_without_log_is_not_a_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             summary = summarize.build_summary(
@@ -39,7 +44,184 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary["ingestion_runs"], [])
         self.assertEqual(summary["failures"], [])
 
+    def test_structured_results_do_not_require_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            self.write_json(
+                run_dir,
+                "results/load.json",
+                {
+                    "ResultFormatVersion": "0.2",
+                    "DurationMillis": 2000,
+                    "Totals": {
+                        "metricCount": 200,
+                        "metricRate": 100.0,
+                        "rowCount": 40,
+                        "rowRate": 20.0,
+                    },
+                },
+            )
+            for name, count, mean in (("query-1.json", 10, 2.0), ("query-2.json", 30, 4.0)):
+                self.write_json(
+                    run_dir,
+                    f"results/{name}",
+                    {
+                        "ResultFormatVersion": "0.2",
+                        "DurationMillis": 1000,
+                        "Totals": {
+                            "overallStats": {
+                                "all_queries": {
+                                    "count": count,
+                                    "meanMilliseconds": mean,
+                                }
+                            }
+                        },
+                    },
+                )
+            summary = summarize.build_summary(
+                run_dir,
+                {
+                    "events": {
+                        "loads": [
+                            {
+                                "attempt": 1,
+                                "database": "benchmark",
+                                "database_mode": "create",
+                                "status": "completed",
+                                "log": "logs/missing-load.log",
+                                "results": "results/load.json",
+                            }
+                        ],
+                        "queries": [
+                            {
+                                "query_type": "lastpoint",
+                                "attempt": attempt,
+                                "database": "benchmark",
+                                "status": "completed",
+                                "log": f"logs/missing-query-{attempt}.log",
+                                "results": f"results/query-{attempt}.json",
+                            }
+                            for attempt in (1, 2)
+                        ],
+                    }
+                },
+            )
+
+        self.assertEqual(summary["failures"], [])
+        self.assertEqual(summary["ingestion_runs"][0]["metrics"], 200)
+        self.assertEqual(summary["ingestion_runs"][0]["duration_seconds"], 2.0)
+        self.assertEqual(summary["queries"][0]["query_count"], 40)
+        self.assertEqual(summary["queries"][0]["weighted_mean_milliseconds"], 3.5)
+
+    def test_legacy_result_uses_log_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            self.write_json(
+                run_dir,
+                "results/query.json",
+                {"ResultFormatVersion": "0.1", "Totals": {}},
+            )
+            log = run_dir / "logs/query.log"
+            log.parent.mkdir()
+            log.write_text(
+                "Run complete after 10 queries\nall queries:\n"
+                "min: 1ms, mean: 3.50ms, max: 4ms, count: 10\n",
+                encoding="utf-8",
+            )
+            summary = summarize.build_summary(
+                run_dir,
+                {
+                    "events": {
+                        "loads": [],
+                        "queries": [
+                            {
+                                "query_type": "lastpoint",
+                                "attempt": 1,
+                                "database": "benchmark",
+                                "status": "completed",
+                                "log": "logs/query.log",
+                                "results": "results/query.json",
+                            }
+                        ],
+                    }
+                },
+            )
+
+        self.assertEqual(summary["failures"], [])
+        self.assertEqual(summary["queries"][0]["weighted_mean_milliseconds"], 3.5)
+
+    def test_incomplete_current_result_is_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            self.write_json(
+                run_dir,
+                "results/query.json",
+                {"ResultFormatVersion": "0.2", "Totals": {"overallStats": {}}},
+            )
+            summary = summarize.build_summary(
+                run_dir,
+                {
+                    "events": {
+                        "loads": [],
+                        "queries": [
+                            {
+                                "query_type": "lastpoint",
+                                "attempt": 1,
+                                "database": "benchmark",
+                                "status": "completed",
+                                "log": "logs/query.log",
+                                "results": "results/query.json",
+                            }
+                        ],
+                    }
+                },
+            )
+
+        self.assertEqual(summary["queries"], [])
+        self.assertIn("all_queries", summary["failures"][0]["reason"])
+        self.assertEqual(summary["failures"][0]["log"], "logs/query.log")
+
+    def test_malformed_current_result_is_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            result = run_dir / "results/query.json"
+            result.parent.mkdir()
+            result.write_text("{not-json", encoding="utf-8")
+            summary = summarize.build_summary(
+                run_dir,
+                {
+                    "events": {
+                        "loads": [],
+                        "queries": [
+                            {
+                                "query_type": "lastpoint",
+                                "attempt": 1,
+                                "database": "benchmark",
+                                "status": "completed",
+                                "log": "logs/query.log",
+                                "results": "results/query.json",
+                            }
+                        ],
+                    }
+                },
+            )
+
+        self.assertEqual(summary["queries"], [])
+        self.assertIn("malformed result JSON", summary["failures"][0]["reason"])
+
     def test_parsers_and_target_identity(self) -> None:
+        structured_load = summarize.parse_load_result(
+            {
+                "DurationMillis": 2000,
+                "Totals": {
+                    "metricCount": 200,
+                    "metricRate": 100.0,
+                    "rowCount": 0,
+                    "rowRate": 0.0,
+                },
+            }
+        )
+        self.assertNotIn("rows", structured_load)
         load = summarize.parse_load_log(
             "loaded 200 metrics in 2.000sec (mean rate 100.00 metrics/sec)\n"
             "loaded 40 rows in 2.000sec (mean rate 20.00 rows/sec)\n"
