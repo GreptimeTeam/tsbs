@@ -110,17 +110,19 @@ def build_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         except (OSError, SummaryError) as exc:
             failures.append({"stage": "query", "log": event["log"], "reason": str(exc)})
 
-    grouped: dict[str, list[dict[str, Any]]] = {}
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for run in query_runs:
-        grouped.setdefault(run["query_type"], []).append(run)
+        key = (run["database"], run["query_type"])
+        grouped.setdefault(key, []).append(run)
 
     queries: list[dict[str, Any]] = []
-    for query_type in sorted(grouped):
-        runs = grouped[query_type]
+    for database, query_type in sorted(grouped):
+        runs = grouped[(database, query_type)]
         count = sum(run["count"] for run in runs)
         weighted = sum(run["mean_milliseconds"] * run["count"] for run in runs)
         queries.append(
             {
+                "database": database,
                 "query_type": query_type,
                 "repetitions": len(runs),
                 "query_count": count,
@@ -133,7 +135,9 @@ def build_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         "run_id": manifest.get("run_id", run_dir.name),
         "profile": manifest.get("profile"),
         "database": manifest.get("database"),
+        "target": manifest.get("target"),
         "dataset": manifest.get("dataset"),
+        "query_set": manifest.get("query_set"),
         "workload": manifest.get("workload", {}),
         "ingestion_runs": ingestion_runs,
         "queries": queries,
@@ -146,8 +150,12 @@ def render_markdown(summary: dict[str, Any]) -> str:
         f"# GreptimeDB TSBS benchmark: {summary['run_id']}",
         "",
         f"- Profile: `{summary.get('profile')}`",
-        f"- Database: `{summary.get('database')}`",
+        f"- Current database: `{summary.get('database')}`",
     ]
+    target = summary.get("target")
+    if target:
+        target_name = target.get("database_id") or target.get("endpoint")
+        lines.append(f"- Benchmark target: `{target.get('mode')}:{target_name}`")
     dataset = summary.get("dataset")
     if dataset:
         lines.extend(
@@ -158,18 +166,26 @@ def render_markdown(summary: dict[str, Any]) -> str:
                 f"- Data path: `{dataset.get('data_path')}`",
             ]
         )
+    query_set = summary.get("query_set")
+    if query_set:
+        lines.extend(
+            [
+                f"- Query set: `{query_set.get('query_set_id')}`",
+                f"- Query-set manifest SHA-256: `{query_set.get('manifest_sha256')}`",
+            ]
+        )
     lines.extend(["", "## Ingestion", ""])
     if summary["ingestion_runs"]:
         lines.extend(
             [
-                "| Attempt | Mode | Metrics | Metrics/s | Rows | Rows/s | Log |",
-                "| ---: | --- | ---: | ---: | ---: | ---: | --- |",
+                "| Database | Attempt | Mode | Metrics | Metrics/s | Rows | Rows/s | Log |",
+                "| --- | ---: | --- | ---: | ---: | ---: | ---: | --- |",
             ]
         )
         for run in summary["ingestion_runs"]:
             rows_per_second = f"{run['rows_per_second']:.2f}" if "rows_per_second" in run else "-"
             lines.append(
-                f"| {run['attempt']} | {run['mode']} | {run['metrics']} | "
+                f"| `{run['database']}` | {run['attempt']} | {run['mode']} | {run['metrics']} | "
                 f"{run['metrics_per_second']:.2f} | {run.get('rows', '-')} | {rows_per_second} | "
                 f"`{run['log']}` |"
             )
@@ -180,13 +196,14 @@ def render_markdown(summary: dict[str, Any]) -> str:
     if summary["queries"]:
         lines.extend(
             [
-                "| Query type | Repetitions | Query count | Weighted mean (ms) |",
-                "| --- | ---: | ---: | ---: |",
+                "| Database | Query type | Repetitions | Query count | Weighted mean (ms) |",
+                "| --- | --- | ---: | ---: | ---: |",
             ]
         )
         for query in summary["queries"]:
             lines.append(
-                f"| `{query['query_type']}` | {query['repetitions']} | {query['query_count']} | "
+                f"| `{query['database']}` | `{query['query_type']}` | {query['repetitions']} | "
+                f"{query['query_count']} | "
                 f"{query['weighted_mean_milliseconds']:.3f} |"
             )
     else:

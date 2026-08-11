@@ -1,4 +1,4 @@
 interface:
   display_name: "Generate TSBS Data"
-  short_description: "Generate and reuse shared TSBS datasets"
-  default_prompt: "Use $generate-tsbs-data to generate or reuse a cached TSBS dataset in the requested format."
+  short_description: "Prepare and generate shared TSBS datasets"
+  default_prompt: "Use $generate-tsbs-data to prepare or generate a validated shared TSBS dataset."

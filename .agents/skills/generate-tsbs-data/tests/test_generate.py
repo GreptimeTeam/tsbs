@@ -56,6 +56,25 @@ class DatasetIdentityTests(unittest.TestCase):
             self.assertEqual(reused["spec"], created["spec"])
             self.assertEqual(reused["spec"]["scale"], 10)
 
+    def test_prepare_creates_metadata_only_logical_dataset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            result_file = Path(temp) / "result.json"
+            code = generate.main(
+                ["prepare", "--profile", "smoke", "--dataset-root", temp,
+                 "--result-file", str(result_file)]
+            )
+            self.assertEqual(code, 0)
+            result = json.loads(result_file.read_text(encoding="utf-8"))
+            dataset = Path(result["dataset_path"])
+            self.assertTrue((dataset / "dataset.json").is_file())
+            self.assertFalse((dataset / "formats").exists())
+            self.assertNotIn("data_path", result)
+            second = generate.make_parser().parse_args(
+                ["prepare", "--profile", "smoke", "--dataset-root", temp]
+            )
+            selected = generate.resolve_dataset_path(second, generate.logical_spec(second))
+            self.assertTrue((selected / "dataset.json").is_file())
+
 
 class DatasetVariantTests(unittest.TestCase):
     def make_generator(self, root: Path, body: str) -> Path:

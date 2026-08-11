@@ -1,58 +1,64 @@
 # GreptimeDB TSBS workload reference
 
+## Shared workspace
+
+```text
+.benchmarks/
+├── datasets/<dataset-id>/...
+├── queries/<dataset-id>/greptime/<query-set-id>/
+│   ├── manifest.json
+│   └── queries/<query-type>.dat
+└── greptimedb/
+    ├── databases/<database-id>/{manifest.json,data/,logs/}
+    └── runs/<run-id>/{manifest.json,logs/,results/,summary.json,summary.md}
+```
+
+A query-set identity includes the logical dataset identity and specification,
+Greptime query format, use case, seed, timestamp range, and the sorted
+query-type-to-count map. A subset is a complete set with only those files.
+Generation publishes the directory atomically; generator commands and stderr
+remain in the initiating run rather than the shared set.
+
 ## Profiles
 
-Both profiles use seed `123`, a `10s` data interval, the `cpu-only` data use
-case, the `devops` query use case, Influx line protocol input, and GreptimeDB
-query format.
-
-Data is resolved through `$generate-tsbs-data` and normally lives under
-`.benchmarks/datasets/<dataset-id>/formats/influx/data`. The run manifest pins
-the dataset path and SHA-256 checksum. GreptimeDB and InfluxDB 3 may consume the
-same `influx` format variant; their query inputs remain database-specific.
+Both profiles use seed `123`, interval `10s`, data use case `cpu-only`, query
+use case `devops`, Influx line protocol data, and Greptime query format.
 
 | Setting | `manual` (default) | `smoke` |
 | --- | --- | --- |
 | Start | `2023-06-11T00:00:00Z` | `2023-06-11T00:00:00Z` |
 | End | `2023-06-14T00:00:00Z` | `2023-06-12T00:00:00Z` |
-| Hosts (`scale`) | 4000 | 10 |
+| Hosts | 4000 | 10 |
 | Load workers | 6 | 2 |
 | Query workers | 1 | 1 |
 | Batch size | 3000 | 3000 |
 
-The query generator receives the end timestamp plus one second, matching the
-original benchmark manual.
+The query generator receives the end timestamp plus one second.
 
-## Query types and manual counts
+## Query counts
 
-| Query type | Count |
-| --- | ---: |
-| `cpu-max-all-1` | 100 |
-| `cpu-max-all-8` | 100 |
-| `double-groupby-1` | 50 |
-| `double-groupby-5` | 50 |
-| `double-groupby-all` | 50 |
-| `groupby-orderby-limit` | 50 |
-| `high-cpu-1` | 100 |
-| `high-cpu-all` | 50 |
-| `lastpoint` | 10 |
-| `single-groupby-1-1-1` | 100 |
-| `single-groupby-1-1-12` | 100 |
-| `single-groupby-1-8-1` | 100 |
-| `single-groupby-5-1-1` | 100 |
-| `single-groupby-5-1-12` | 100 |
-| `single-groupby-5-8-1` | 100 |
+| Query type | Manual | Smoke |
+| --- | ---: | ---: |
+| `cpu-max-all-1` | 100 | 10 |
+| `cpu-max-all-8` | 100 | 10 |
+| `double-groupby-1` | 50 | 10 |
+| `double-groupby-5` | 50 | 10 |
+| `double-groupby-all` | 50 | 10 |
+| `groupby-orderby-limit` | 50 | 10 |
+| `high-cpu-1` | 100 | 10 |
+| `high-cpu-all` | 50 | 10 |
+| `lastpoint` | 10 | 10 |
+| `single-groupby-1-1-1` | 100 | 10 |
+| `single-groupby-1-1-12` | 100 | 10 |
+| `single-groupby-1-8-1` | 100 | 10 |
+| `single-groupby-5-1-1` | 100 | 10 |
+| `single-groupby-5-1-12` | 100 | 10 |
+| `single-groupby-5-8-1` | 100 | 10 |
 
-The smoke profile runs 10 queries of every type.
+## Database state
 
-## Database modes
-
-- `create`: pass `--do-create-db=true --do-abort-on-exist=true`. Create a
-  missing database and fail rather than drop an existing database.
-- `reuse`: pass `--do-create-db=false`. Load into the named existing database
-  without creating or dropping it.
-- `reset`: pass `--do-create-db=true`, allowing TSBS to drop and recreate the
-  database. Require `--confirm-reset` to exactly match the database name.
-
-Repeated `reuse` loads can duplicate data. Prefer query-only repetitions after
-one successful ingestion.
+Managed workspace manifests bind `database_id`, SQL database name, and one
+loaded dataset specification/checksum. A matching dataset is reused. A
+different dataset requires a successfully confirmed reset before the binding
+changes. External `create`, `reuse`, and `reset` map to the corresponding TSBS
+loader flags; external reuse may duplicate data.

@@ -1,6 +1,6 @@
 # TSBS shared dataset reference
 
-## Cache layout
+## Layout and identity
 
 ```text
 .benchmarks/datasets/<dataset-id>/
@@ -11,10 +11,13 @@
     └── manifest.json
 ```
 
-The dataset ID identifies logical points and excludes serialization format.
-Its normalized specification contains `use_case`, `seed`, `scale`, `start`,
-`end`, and `log_interval`. Each format directory contains one serialization of
-those points and records its own checksum and generator provenance.
+Only `dataset.json` is required. Metadata-only preparation deliberately leaves
+`formats/` absent. The dataset ID identifies logical points and excludes
+serialization format. Its canonical specification contains `use_case`,
+`seed`, `scale`, `start`, `end`, and `log_interval`.
+
+Each format directory contains one serialization and records status, byte
+size, SHA-256, generator binary checksum, Git revision, and timestamps.
 
 ## Profiles
 
@@ -29,20 +32,13 @@ those points and records its own checksum and generator provenance.
 
 `manual` is the default. Explicit flags override profile values.
 
-## Formats and reuse
+## Formats and safety
 
-Pass any format accepted by `tsbs_generate_data`. The generator remains the
-authoritative format validator. Use the same format variant only when the
-database loader accepts the exact serialization.
+The generator validates format names. GreptimeDB and InfluxDB 3 consume the
+`influx` variant; other loaders should request their native TSBS format under
+the same logical dataset ID.
 
-GreptimeDB and InfluxDB 3 both use the Influx line-protocol serializer in this
-repository, so both should request `--format influx`. Other databases should
-request their native TSBS format under the same logical dataset ID.
-
-## Safety
-
-- Validate the manifest and SHA-256 checksum before every reuse.
-- Treat `--regenerate` as an explicit replacement of a shared artifact.
-- Publish a new payload only after generation succeeds.
-- Retain generation logs after failures.
-- Keep cached data out of Git; `.benchmarks/` is ignored.
+- Validate the logical manifest and artifact size/checksum before reuse.
+- Publish a replacement payload only after successful generation.
+- Preserve the completed artifact when regeneration fails.
+- Keep cached data outside Git; `.benchmarks/` is ignored.

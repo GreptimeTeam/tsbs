@@ -315,6 +315,16 @@ def result(
     }
 
 
+def logical_result(dataset_dir: Path, dataset_manifest: dict[str, Any], *, reused: bool) -> dict[str, Any]:
+    """Return metadata for a logical dataset without requiring a format artifact."""
+    return {
+        "dataset_id": dataset_manifest["dataset_id"],
+        "dataset_path": str(dataset_dir),
+        "spec": dataset_manifest["spec"],
+        "reused": reused,
+    }
+
+
 def prepare_dataset(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     explicit_selection = bool(args.dataset_id or args.dataset_path)
     dataset_dir = resolve_dataset_path(args) if explicit_selection else None
@@ -442,6 +452,19 @@ def make_parser() -> argparse.ArgumentParser:
     generate.add_argument("--result-file", type=Path)
     generate.add_argument("--json", action="store_true")
 
+    prepare = subparsers.add_parser("prepare", help="create or reuse logical dataset metadata only")
+    add_root_options(prepare)
+    add_selection_options(prepare)
+    prepare.add_argument("--profile", choices=sorted(PROFILES))
+    prepare.add_argument("--use-case")
+    prepare.add_argument("--start")
+    prepare.add_argument("--end")
+    prepare.add_argument("--scale", type=int)
+    prepare.add_argument("--seed", type=int)
+    prepare.add_argument("--log-interval")
+    prepare.add_argument("--result-file", type=Path)
+    prepare.add_argument("--json", action="store_true")
+
     list_command = subparsers.add_parser("list", help="list cached logical datasets")
     add_root_options(list_command)
     list_command.add_argument("--json", action="store_true")
@@ -479,6 +502,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 regenerate=args.regenerate,
                 rebuild=args.rebuild,
             )
+        elif args.command == "prepare":
+            selected_before = resolve_dataset_path(args, logical_spec(args))
+            existed = (selected_before / "dataset.json").is_file()
+            path, manifest = prepare_dataset(args)
+            output = logical_result(path, manifest, reused=existed)
         elif args.command == "list":
             output = list_datasets(args)
         elif args.command == "inspect":
