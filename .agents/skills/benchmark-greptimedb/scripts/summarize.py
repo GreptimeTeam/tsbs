@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Parse TSBS logs and write GreptimeDB benchmark summaries."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+
+METRIC_RE = re.compile(
+    r"loaded\s+(?P<count>\d+)\s+metrics\s+in\s+(?P<seconds>[0-9.]+)sec.*?"
+    r"mean rate\s+(?P<rate>[0-9.]+)\s+metrics/sec"
+)
+ROW_RE = re.compile(
+    r"loaded\s+(?P<count>\d+)\s+rows\s+in\s+(?P<seconds>[0-9.]+)sec.*?"
+    r"mean rate\s+(?P<rate>[0-9.]+)\s+rows/sec"
+)
+QUERY_RE = re.compile(
+    r"all queries\s*:\s*\n\s*"
+    r"min:.*?mean:\s*(?P<mean>[0-9.]+)ms,.*?count:\s*(?P<count>\d+)",
+    re.DOTALL,
+)
+
+
+class SummaryError(ValueError):
+    """Raised when a completed TSBS log cannot be parsed."""
+
+
+def parse_load_log(text: str) -> dict[str, Any]:
+    metric_matches = list(METRIC_RE.finditer(text))
+    if not metric_matches:
+        raise SummaryError("load log has no final metric summary")
+    metric = metric_matches[-1]
+    result: dict[str, Any] = {
+        "metrics": int(metric.group("count")),
+        "duration_seconds": float(metric.group("seconds")),
+        "metrics_per_second": float(metric.group("rate")),
+    }
+    row_matches = list(ROW_RE.finditer(text))
+    if row_matches:
+        row = row_matches[-1]
+        result.update(
+            {
+                "rows": int(row.group("count")),
+                "rows_per_second": float(row.group("rate")),
+            }
+        )
+    return result
+
+
+def parse_query_log(text: str) -> dict[str, Any]:
+    marker = text.rfind("Run complete after")
+    if marker < 0:
+        raise SummaryError("query log has no final run marker")
+    matches = list(QUERY_RE.finditer(text[marker:]))
+    if not matches:
+        raise SummaryError("query log has no final all-queries summary")
+    match = matches[-1]
+    return {
+        "mean_milliseconds": float(match.group("mean")),
+        "count": int(match.group("count")),
+    }
+
+
+def _read_log(run_dir: Path, relative_path: str) -> str:
+    return (run_dir / relative_path).read_text(encoding="utf-8", errors="replace")
+
+
+def build_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    failures: list[dict[str, str]] = []
+    ingestion_runs: list[dict[str, Any]] = []
+    query_runs: list[dict[str, Any]] = []
+
+    for event in manifest.get("events", {}).get("loads", []):
+        if event.get("status") == "reused":
+            continue
+        base = {
+            "attempt": event["attempt"],
+            "database": event["database"],
+            "mode": event["database_mode"],
+            "log": event["log"],
+        }
+        if event.get("status") != "completed":
+            failures.append(
+                {"stage": "load", "log": event["log"], "reason": event.get("status", "failed")}
+            )
+            continue
+        try:
+            base.update(parse_load_log(_read_log(run_dir, event["log"])))
+            ingestion_runs.append(base)
+        except (OSError, SummaryError) as exc:
+            failures.append({"stage": "load", "log": event["log"], "reason": str(exc)})
+
+    for event in manifest.get("events", {}).get("queries", []):
+        base = {
+            "query_type": event["query_type"],
+            "attempt": event["attempt"],
+            "database": event["database"],
+            "log": event["log"],
+        }
+        if event.get("status") != "completed":
+            failures.append(
+                {"stage": "query", "log": event["log"], "reason": event.get("status", "failed")}
+            )
+            continue
+        try:
+            base.update(parse_query_log(_read_log(run_dir, event["log"])))
+            query_runs.append(base)
+        except (OSError, SummaryError) as exc:
+            failures.append({"stage": "query", "log": event["log"], "reason": str(exc)})
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for run in query_runs:
+        key = (run["database"], run["query_type"])
+        grouped.setdefault(key, []).append(run)
+
+    queries: list[dict[str, Any]] = []
+    for database, query_type in sorted(grouped):
+        runs = grouped[(database, query_type)]
+        count = sum(run["count"] for run in runs)
+        weighted = sum(run["mean_milliseconds"] * run["count"] for run in runs)
+        queries.append(
+            {
+                "database": database,
+                "query_type": query_type,
+                "repetitions": len(runs),
+                "query_count": count,
+                "weighted_mean_milliseconds": weighted / count if count else 0.0,
+                "runs": runs,
+            }
+        )
+
+    return {
+        "run_id": manifest.get("run_id", run_dir.name),
+        "profile": manifest.get("profile"),
+        "database": manifest.get("database"),
+        "target": manifest.get("target"),
+        "dataset": manifest.get("dataset"),
+        "query_set": manifest.get("query_set"),
+        "workload": manifest.get("workload", {}),
+        "ingestion_runs": ingestion_runs,
+        "queries": queries,
+        "failures": failures,
+    }
+
+
+def render_markdown(summary: dict[str, Any]) -> str:
+    lines = [
+        f"# GreptimeDB TSBS benchmark: {summary['run_id']}",
+        "",
+        f"- Profile: `{summary.get('profile')}`",
+        f"- Current database: `{summary.get('database')}`",
+    ]
+    target = summary.get("target")
+    if target:
+        target_name = target.get("database_id") or target.get("endpoint")
+        lines.append(f"- Benchmark target: `{target.get('mode')}:{target_name}`")
+    dataset = summary.get("dataset")
+    if dataset:
+        lines.extend(
+            [
+                f"- Dataset: `{dataset.get('dataset_id')}`",
+                f"- Data format: `{dataset.get('format')}`",
+                f"- Data SHA-256: `{dataset.get('sha256')}`",
+                f"- Data path: `{dataset.get('data_path')}`",
+            ]
+        )
+    query_set = summary.get("query_set")
+    if query_set:
+        lines.extend(
+            [
+                f"- Query set: `{query_set.get('query_set_id')}`",
+                f"- Query-set manifest SHA-256: `{query_set.get('manifest_sha256')}`",
+            ]
+        )
+    lines.extend(["", "## Ingestion", ""])
+    if summary["ingestion_runs"]:
+        lines.extend(
+            [
+                "| Database | Attempt | Mode | Metrics | Metrics/s | Rows | Rows/s | Log |",
+                "| --- | ---: | --- | ---: | ---: | ---: | ---: | --- |",
+            ]
+        )
+        for run in summary["ingestion_runs"]:
+            rows_per_second = f"{run['rows_per_second']:.2f}" if "rows_per_second" in run else "-"
+            lines.append(
+                f"| `{run['database']}` | {run['attempt']} | {run['mode']} | {run['metrics']} | "
+                f"{run['metrics_per_second']:.2f} | {run.get('rows', '-')} | {rows_per_second} | "
+                f"`{run['log']}` |"
+            )
+    else:
+        lines.append("No completed ingestion runs.")
+
+    lines.extend(["", "## Queries", ""])
+    if summary["queries"]:
+        lines.extend(
+            [
+                "| Database | Query type | Repetitions | Query count | Weighted mean (ms) |",
+                "| --- | --- | ---: | ---: | ---: |",
+            ]
+        )
+        for query in summary["queries"]:
+            lines.append(
+                f"| `{query['database']}` | `{query['query_type']}` | {query['repetitions']} | "
+                f"{query['query_count']} | "
+                f"{query['weighted_mean_milliseconds']:.3f} |"
+            )
+    else:
+        lines.append("No completed query runs.")
+
+    if summary["failures"]:
+        lines.extend(["", "## Failures", "", "| Stage | Log | Reason |", "| --- | --- | --- |"])
+        for failure in summary["failures"]:
+            reason = failure["reason"].replace("|", "\\|")
+            lines.append(f"| {failure['stage']} | `{failure['log']}` | {reason} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    summary = build_summary(run_dir, manifest)
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    (run_dir / "summary.md").write_text(render_markdown(summary), encoding="utf-8")
+    return summary
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-dir", required=True, type=Path)
+    args = parser.parse_args()
+    run_dir = args.run_dir.resolve()
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    summary = write_summary(run_dir, manifest)
+    print(run_dir / "summary.md")
+    return 1 if summary["failures"] else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

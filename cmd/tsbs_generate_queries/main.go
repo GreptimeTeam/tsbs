@@ -95,6 +95,7 @@ func main() {
 	qg := inputs.NewQueryGenerator(useCaseMatrix)
 	err := qg.Generate(conf)
 	if err != nil {
-		fmt.Printf("error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 }

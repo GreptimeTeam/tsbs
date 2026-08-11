@@ -5,6 +5,9 @@
 .vscode
 *~
 bin
+.benchmarks/
+__pycache__/
+*.py[cod]
 
 # High Dynamic Range (HDR) Histogram files
 *.hdr
