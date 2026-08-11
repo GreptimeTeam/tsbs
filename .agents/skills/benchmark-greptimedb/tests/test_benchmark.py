@@ -113,6 +113,67 @@ wall clock time: 1.0sec
 
 
 class RunnerSafetyTests(unittest.TestCase):
+    def test_existing_run_inherits_database_when_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            manifest = {
+                "run_id": "existing",
+                "database": "custom",
+                "workload": json.loads(json.dumps(benchmark.PROFILES["smoke"])),
+                "events": {"loads": [], "queries": []},
+            }
+            (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            args = benchmark.make_parser().parse_args(
+                ["query", "--run-dir", str(run_dir), "--endpoint", "http://localhost:4000"]
+            )
+
+            self.assertIsNone(args.database)
+            benchmark.resolve_database(args)
+            self.assertEqual(args.database, "custom")
+            _, prepared = benchmark.prepare_run(args)
+            self.assertEqual(prepared["database"], "custom")
+
+    def test_explicit_database_overrides_existing_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            (run_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "existing",
+                        "database": "custom",
+                        "workload": json.loads(json.dumps(benchmark.PROFILES["smoke"])),
+                        "events": {"loads": [], "queries": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = benchmark.make_parser().parse_args(
+                [
+                    "query",
+                    "--run-dir",
+                    str(run_dir),
+                    "--endpoint",
+                    "http://localhost:4000",
+                    "--database",
+                    "benchmark",
+                ]
+            )
+
+            benchmark.resolve_database(args)
+            _, prepared = benchmark.prepare_run(args)
+            self.assertEqual(args.database, "benchmark")
+            self.assertEqual(prepared["database"], "benchmark")
+
+    def test_new_run_defaults_to_benchmark_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "new-run"
+            args = benchmark.make_parser().parse_args(
+                ["query", "--run-dir", str(run_dir), "--endpoint", "http://localhost:4000"]
+            )
+
+            benchmark.resolve_database(args)
+            self.assertEqual(args.database, "benchmark")
+
     def test_database_modes(self) -> None:
         self.assertEqual(
             benchmark.database_mode_args("create", "bench", None),
@@ -150,6 +211,31 @@ class RunnerSafetyTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(benchmark.BenchmarkError, "exactly match"):
             benchmark.validate_args(args)
+
+    def test_reset_confirmation_uses_inherited_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            (run_dir / "manifest.json").write_text(
+                json.dumps({"database": "custom"}), encoding="utf-8"
+            )
+            args = benchmark.make_parser().parse_args(
+                [
+                    "load",
+                    "--run-dir",
+                    str(run_dir),
+                    "--endpoint",
+                    "http://localhost:4000",
+                    "--database-mode",
+                    "reset",
+                    "--confirm-reset",
+                    "other",
+                ]
+            )
+
+            benchmark.resolve_database(args)
+            self.assertEqual(args.database, "custom")
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "exactly match"):
+                benchmark.validate_args(args)
 
     def test_attempts_are_append_only_per_query_type(self) -> None:
         events = [
@@ -214,6 +300,87 @@ class RunnerSafetyTests(unittest.TestCase):
             self.assertEqual(benchmark.generate_data(args, run_dir, manifest), legacy)
             saved = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["generated_data"], "data/influx-data.lp")
+
+    def test_data_workload_overrides_do_not_reuse_legacy_data(self) -> None:
+        changes = {
+            "start": "2023-06-10T00:00:00Z",
+            "end": "2023-06-13T00:00:00Z",
+            "scale": 20,
+            "seed": 456,
+            "log_interval": "20s",
+        }
+        for field, value in changes.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
+                run_dir = Path(temp)
+                (run_dir / "data").mkdir()
+                (run_dir / "data" / "influx-data.lp").write_text(
+                    "cpu value=1 1\n", encoding="utf-8"
+                )
+                manifest = {
+                    "run_id": "legacy",
+                    "profile": "smoke",
+                    "workload": json.loads(json.dumps(benchmark.PROFILES["smoke"])),
+                    "events": {"loads": [], "queries": []},
+                }
+                (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                option = "--" + field.replace("_", "-")
+                args = benchmark.make_parser().parse_args(
+                    ["generate", "--run-dir", str(run_dir), "--only", "data", option, str(value)]
+                )
+                _, prepared = benchmark.prepare_run(args)
+                generated = run_dir / "generated.lp"
+
+                def write_dataset_result(command, _log_path, **_kwargs):
+                    result_path = Path(command[command.index("--result-file") + 1])
+                    result_path.write_text(
+                        json.dumps(
+                            {
+                                "dataset_id": "updated",
+                                "dataset_path": str(run_dir / "dataset"),
+                                "data_path": str(generated),
+                                "format": "influx",
+                                "sha256": "1234",
+                                "spec": {
+                                    "use_case": "cpu-only",
+                                    **{
+                                        name: prepared["workload"][name]
+                                        for name in benchmark.DATA_WORKLOAD_OPTIONS
+                                    },
+                                },
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+                with mock.patch.object(
+                    benchmark, "run_tee", side_effect=write_dataset_result
+                ) as run_tee:
+                    result = benchmark.generate_data(args, run_dir, prepared)
+
+                run_tee.assert_called_once()
+                self.assertEqual(result, generated)
+                self.assertEqual(prepared["workload"][field], value)
+
+    def test_non_data_override_still_reuses_legacy_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            (run_dir / "data").mkdir()
+            legacy = run_dir / "data" / "influx-data.lp"
+            legacy.write_text("cpu value=1 1\n", encoding="utf-8")
+            manifest = {
+                "run_id": "legacy",
+                "workload": {},
+                "events": {"loads": [], "queries": []},
+            }
+            args = benchmark.make_parser().parse_args(
+                ["generate", "--only", "data", "--query-workers", "2"]
+            )
+
+            with mock.patch.object(benchmark, "run_tee") as run_tee:
+                result = benchmark.generate_data(args, run_dir, manifest)
+
+            run_tee.assert_not_called()
+            self.assertEqual(result, legacy)
 
     def test_build_marker_does_not_trust_an_untracked_binary(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

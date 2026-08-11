@@ -26,6 +26,8 @@ SCRIPT_PATH = Path(__file__).resolve()
 REPO_ROOT = SCRIPT_PATH.parents[4]
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / ".benchmarks" / "greptimedb"
 DATASET_RUNNER = REPO_ROOT / ".agents" / "skills" / "generate-tsbs-data" / "scripts" / "generate.py"
+DEFAULT_DATABASE = "benchmark"
+DATA_WORKLOAD_OPTIONS = ("start", "end", "scale", "seed", "log_interval")
 
 QUERY_COUNTS_MANUAL = {
     "cpu-max-all-1": 100,
@@ -110,6 +112,19 @@ def save_manifest(run_dir: Path, manifest: dict[str, Any]) -> None:
     os.replace(temp, run_dir / "manifest.json")
 
 
+def resolve_database(args: argparse.Namespace) -> None:
+    """Resolve an omitted database before validation or benchmark work."""
+    if not hasattr(args, "database") or args.database is not None:
+        return
+    database = DEFAULT_DATABASE
+    if args.run_dir:
+        manifest_path = args.run_dir.resolve() / "manifest.json"
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            database = manifest.get("database") or DEFAULT_DATABASE
+    args.database = database
+
+
 def prepare_run(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     run_dir = args.run_dir.resolve() if args.run_dir else new_run_dir()
     for directory in ("data", "queries", "logs", "results", "greptimedb/data", "greptimedb/logs"):
@@ -123,7 +138,7 @@ def prepare_run(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
             "run_id": run_dir.name,
             "created_at": utc_now(),
             "profile": profile,
-            "database": getattr(args, "database", "benchmark"),
+            "database": getattr(args, "database", DEFAULT_DATABASE),
             "workload": json.loads(json.dumps(PROFILES[profile])),
             "events": {"loads": [], "queries": []},
         }
@@ -289,7 +304,11 @@ def generate_data(
 ) -> Path:
     legacy = run_dir / "data" / "influx-data.lp"
     if legacy.exists() and not manifest.get("dataset") and not (
-        args.dataset_root or args.dataset_id or args.dataset_path or args.regenerate
+        args.dataset_root
+        or args.dataset_id
+        or args.dataset_path
+        or args.regenerate
+        or any(getattr(args, option) is not None for option in DATA_WORKLOAD_OPTIONS)
     ):
         print(f"Reusing legacy generated data: {legacy}")
         manifest["generated_data"] = relative(run_dir, legacy)
@@ -610,7 +629,10 @@ def add_connection_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--endpoint")
     parser.add_argument("--http-port", type=int, default=4000)
     parser.add_argument("--startup-timeout", type=int, default=60)
-    parser.add_argument("--database", default="benchmark")
+    parser.add_argument(
+        "--database",
+        help=f"database name (inherits an existing run; defaults to {DEFAULT_DATABASE} for a new run)",
+    )
 
 
 def add_load_options(parser: argparse.ArgumentParser) -> None:
@@ -677,6 +699,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_dir: Path | None = None
     manifest: dict[str, Any] | None = None
     try:
+        resolve_database(args)
         validate_args(args)
         if args.command == "summarize":
             run_dir = args.run_dir.resolve()
