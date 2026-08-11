@@ -75,6 +75,8 @@ def build_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     query_runs: list[dict[str, Any]] = []
 
     for event in manifest.get("events", {}).get("loads", []):
+        if event.get("status") == "reused":
+            continue
         base = {
             "attempt": event["attempt"],
             "database": event["database"],

@@ -17,6 +17,28 @@ import summarize  # noqa: E402
 
 
 class SummaryTests(unittest.TestCase):
+    def test_reused_load_without_log_is_not_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            summary = summarize.build_summary(
+                Path(temp),
+                {
+                    "events": {
+                        "loads": [
+                            {
+                                "attempt": 1,
+                                "database": "benchmark",
+                                "database_mode": "reuse",
+                                "status": "reused",
+                            }
+                        ],
+                        "queries": [],
+                    }
+                },
+            )
+
+        self.assertEqual(summary["ingestion_runs"], [])
+        self.assertEqual(summary["failures"], [])
+
     def test_parsers_and_target_identity(self) -> None:
         load = summarize.parse_load_log(
             "loaded 200 metrics in 2.000sec (mean rate 100.00 metrics/sec)\n"
