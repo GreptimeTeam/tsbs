@@ -34,6 +34,10 @@ def render_markdown(summary: dict[str, Any]) -> str:
     if target:
         target_name = target.get("database_id") or target.get("endpoint")
         lines.append(f"- Benchmark target: `{target.get('mode')}:{target_name}`")
+        if target.get("version"):
+            lines.append(f"- GreptimeDB version: `{target.get('version')}`")
+        if target.get("binary_sha256"):
+            lines.append(f"- GreptimeDB binary SHA-256: `{target.get('binary_sha256')}`")
     dataset = summary.get("dataset")
     if dataset:
         lines.extend(

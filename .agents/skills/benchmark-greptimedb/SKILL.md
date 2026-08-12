@@ -8,13 +8,15 @@ description: Run repeatable GreptimeDB TSBS benchmarks with shared datasets, com
 Use `scripts/benchmark.py` for execution and structured result parsing. Read
 `references/workload.md` before selecting workload sizes, query types, database
 modes, or shared workspace identifiers. Use `$generate-tsbs-data` for standalone
-dataset generation, inspection, or non-Greptime serialization formats.
+dataset generation, inspection, or non-Greptime serialization formats. Use
+`$setup-greptimedb` to install and prepare a managed database workspace.
 
 ## Collect inputs
 
 1. Select a stage: `all`, `generate`, `load`, `query`, or `summarize`.
 2. For `all`, `load`, or `query`, select exactly one target:
-   - managed: an executable GreptimeDB binary plus a reusable `--database-id`;
+   - managed: a prepared reusable `--database-id`; legacy workspaces also need
+     an explicit GreptimeDB binary;
    - external: an HTTP endpoint.
 3. Select the SQL `--database`. For external loads, also select `create`,
    `reuse`, or explicitly confirmed `reset`. Never infer reset authorization.
@@ -26,8 +28,7 @@ Run from the repository root:
 
 ```bash
 python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py all \
-  --profile smoke --greptime-bin /absolute/path/to/greptime \
-  --database-id smoke-db
+  --profile smoke --database-id smoke-db
 
 python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py generate \
   --profile smoke --only queries \
@@ -56,6 +57,10 @@ size, and checksum validation.
 
 - Give every managed workspace a stable `--database-id`; `--database-root`
   defaults to `.benchmarks/greptimedb/databases`.
+- Prepare new managed workspaces with `$setup-greptimedb`; the benchmark runner
+  verifies and discovers their version-bound binary automatically.
+- Keep using `--greptime-bin` for legacy workspaces. Never silently adopt a
+  legacy workspace into a downloaded installation.
 - Keep one SQL database and one loaded dataset per managed workspace. Reuse a
   matching binding without loading duplicate data.
 - Rebind only with `--database-mode reset --confirm-reset DATABASE`, after the

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Setup GreptimeDB"
+  short_description: "Install and prepare local GreptimeDB"
+  default_prompt: "Use $setup-greptimedb to install and prepare a verified local GreptimeDB database workspace."
