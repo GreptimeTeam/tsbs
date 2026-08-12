@@ -113,7 +113,11 @@ def download_bytes(url: str, *, accept: str = "application/octet-stream,*/*") ->
 
 
 def download(url: str, destination: Path) -> None:
-    destination.write_bytes(download_bytes(url))
+    try:
+        with urllib.request.urlopen(request(url), timeout=60) as response, destination.open("wb") as output:
+            shutil.copyfileobj(response, output)
+    except (OSError, urllib.error.URLError) as exc:
+        raise SetupError(f"could not download {url}: {exc}") from exc
 
 
 def resolve_official_version() -> str:

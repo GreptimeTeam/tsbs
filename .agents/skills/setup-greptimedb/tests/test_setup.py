@@ -48,6 +48,21 @@ class VersionResolutionTests(unittest.TestCase):
         self.assertEqual(value.get_header("User-agent"), setup.USER_AGENT)
         self.assertEqual(value.get_header("Authorization"), "Bearer secret")
 
+    def test_download_streams_response_to_destination(self) -> None:
+        payload = b"release archive contents"
+
+        class StreamingResponse(io.BytesIO):
+            def read(self, size: int = -1) -> bytes:
+                if size < 0:
+                    raise AssertionError("download must not buffer the complete response")
+                return super().read(size)
+
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "artifact.tar.gz"
+            with mock.patch.object(setup.urllib.request, "urlopen", return_value=StreamingResponse(payload)):
+                setup.download("https://example.test/artifact.tar.gz", destination)
+            self.assertEqual(destination.read_bytes(), payload)
+
 
 class InstallationTests(unittest.TestCase):
     binary_content = b"#!/bin/sh\necho 'greptime 1.1.4'\n"
