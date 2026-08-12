@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -392,7 +393,9 @@ class ManagedDatabaseTests(unittest.TestCase):
 
     def prepare_instance(self, root: Path) -> Path:
         installation = root / "installation"; installation.mkdir(parents=True)
-        binary = installation / "influxdb3"; binary.write_bytes(b"binary"); binary.chmod(0o755)
+        binary = installation / "influxdb3"
+        binary.write_text("#!/bin/sh\necho 'influxdb3 InfluxDB 3 Core, 3.11.1, revision test'\n", encoding="utf-8")
+        binary.chmod(0o755)
         path = root / "db-a"; path.mkdir(); (path / "data").mkdir(); (path / "logs").mkdir()
         benchmark.save_json(path / "manifest.json", {
             "schema_version": 1, "kind": "influxdb3-instance", "instance_id": "db-a",
@@ -435,6 +438,20 @@ class ManagedDatabaseTests(unittest.TestCase):
         benchmark.resolve_database(args)
         with self.assertRaisesRegex(benchmark.BenchmarkError, "exactly one"):
             benchmark.validate_args(args)
+
+    def test_failed_preflight_does_not_bind_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); path = self.prepare_instance(root); args = self.args(root)
+            with mock.patch.object(
+                benchmark.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired(["influxdb3", "--version"], 15),
+            ):
+                with self.assertRaisesRegex(benchmark.BenchmarkError, "not runnable"):
+                    benchmark.prepare_database_workspace(args)
+            persisted = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+            self.assertIsNone(persisted["database"])
+            self.assertIsNone(persisted["binding"])
 
 
 class TargetTests(unittest.TestCase):

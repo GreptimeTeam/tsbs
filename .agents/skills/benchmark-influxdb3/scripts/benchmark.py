@@ -428,11 +428,40 @@ def validate_database_manifest(path: Path, expected_id: str | None = None) -> di
     return manifest
 
 
+def preflight_managed_binary(manifest: dict[str, Any]) -> None:
+    binary = Path(manifest["installation_path"]) / "influxdb3"
+    try:
+        result = subprocess.run(
+            [str(binary), "--version"],
+            cwd=binary.parent,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BenchmarkError(
+            f"managed InfluxDB 3 installation is not runnable: {binary}; "
+            f"repair it with $setup-influxdb3 install --edition {manifest['edition']} "
+            f"--version {manifest['version']} --reinstall: {exc}"
+        ) from exc
+    output = f"{result.stdout}\n{result.stderr}"
+    edition_name = "Core" if manifest["edition"] == "core" else "Enterprise"
+    reported = re.search(r"InfluxDB 3 (Core|Enterprise), ([^,\s]+)", output)
+    if result.returncode != 0 or reported is None or reported.groups() != (edition_name, manifest["version"]):
+        raise BenchmarkError(
+            f"managed InfluxDB 3 installation failed version validation; repair it with "
+            f"$setup-influxdb3 install --edition {manifest['edition']} "
+            f"--version {manifest['version']} --reinstall"
+        )
+
+
 def prepare_database_workspace(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     path = database_workspace(args); manifest_path = path / "manifest.json"
     if not manifest_path.exists():
         raise BenchmarkError(f"managed instance is not prepared; use $setup-influxdb3 first: {path}")
     manifest = validate_database_manifest(path, args.instance_id)
+    preflight_managed_binary(manifest)
     if manifest["edition"] == "enterprise" and manifest.get("license", {}).get("status") != "active":
         raise BenchmarkError("managed Enterprise instance does not have an active license")
     if manifest["database"] is None:

@@ -44,3 +44,7 @@ least as many query workers as URLs to exercise every endpoint.
 deletes and recreates it only after exact name confirmation. Never compare a
 `--no-sync` or `--accept-partial` run with the durable default without clearly
 labeling the difference.
+
+Before binding a managed instance to a SQL database, the runner verifies that
+its pinned executable starts for `--version` and reports the expected edition
+and exact version. Repair incomplete installations with `$setup-influxdb3`.

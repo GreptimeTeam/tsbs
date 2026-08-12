@@ -20,7 +20,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 
 
@@ -30,7 +30,10 @@ DEFAULT_ROOT = REPO_ROOT / ".benchmarks" / "influxdb3"
 DEFAULT_INSTALL_ROOT = DEFAULT_ROOT / "installations"
 DEFAULT_INSTANCE_ROOT = DEFAULT_ROOT / "instances"
 BASE_URL = "https://dl.influxdata.com/influxdb/releases"
+OFFICIAL_INSTALLER_URL = "https://www.influxdata.com/d/install_influxdb3.sh"
+USER_AGENT = "tsbs-influxdb3-setup/1.0"
 SCHEMA_VERSION = 1
+INSTALLATION_SCHEMA_VERSION = 2
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
 
@@ -86,48 +89,196 @@ def artifact_name(edition: str, version: str, target: str) -> str:
     return f"influxdb3-{edition}-{version}_{target}.tar.gz"
 
 
+def request(url: str) -> urllib.request.Request:
+    return urllib.request.Request(
+        url,
+        headers={"User-Agent": USER_AGENT, "Accept": "application/octet-stream,*/*"},
+    )
+
+
+def download_text(url: str) -> str:
+    try:
+        with urllib.request.urlopen(request(url), timeout=60) as response:
+            return response.read().decode("utf-8")
+    except (OSError, UnicodeError, urllib.error.URLError) as exc:
+        raise SetupError(f"could not download {url}: {exc}") from exc
+
+
+def resolve_official_version(edition: str) -> str:
+    variable = "INFLUXDB_OSS_VERSION" if edition == "core" else "INFLUXDB_ENT_VERSION"
+    script = download_text(OFFICIAL_INSTALLER_URL)
+    matches = re.findall(
+        rf'^\s*{re.escape(variable)}=["\']([^"\']+)["\']\s*$',
+        script,
+        flags=re.MULTILINE,
+    )
+    if len(matches) != 1 or not VERSION_RE.fullmatch(matches[0]):
+        raise SetupError(
+            f"could not resolve the official latest {edition} version; "
+            "provide an exact --version"
+        )
+    return matches[0]
+
+
+def resolve_args_version(args: argparse.Namespace) -> None:
+    if args.version is None:
+        args.version = resolve_official_version(args.edition)
+        args.version_source = "official-installer"
+    else:
+        args.version_source = "explicit"
+
+
 def installation_path(args: argparse.Namespace, target: str | None = None) -> Path:
     root = (args.install_root or DEFAULT_INSTALL_ROOT).expanduser().resolve()
     return root / args.edition / args.version / (target or platform_tag())
 
 
+def distribution_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    entries = sorted(
+        (entry for entry in path.rglob("*") if entry.relative_to(path).as_posix() != "manifest.json"),
+        key=lambda entry: entry.relative_to(path).as_posix(),
+    )
+    for entry in entries:
+        relative = entry.relative_to(path).as_posix()
+        stat = entry.lstat()
+        mode = stat.st_mode & 0o7777
+        if entry.is_symlink():
+            kind = "symlink"
+            content = os.readlink(entry).encode()
+        elif entry.is_file():
+            kind = "file"
+            content = bytes.fromhex(sha256_file(entry))
+        elif entry.is_dir():
+            kind = "directory"
+            content = b""
+        else:
+            raise SetupError(f"unsupported installation entry: {entry}")
+        digest.update(f"{kind}\0{relative}\0{mode:o}\0".encode())
+        digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def verify_binary(binary: Path, edition: str, version: str) -> None:
+    try:
+        result = subprocess.run(
+            [str(binary), "--version"],
+            cwd=binary.parent,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SetupError(
+            f"InfluxDB 3 installation is not runnable: {binary}; reinstall with --reinstall: {exc}"
+        ) from exc
+    output = f"{result.stdout}\n{result.stderr}"
+    edition_name = "Core" if edition == "core" else "Enterprise"
+    reported = re.search(r"InfluxDB 3 (Core|Enterprise), ([^,\s]+)", output)
+    if result.returncode != 0 or reported is None or reported.groups() != (edition_name, version):
+        raise SetupError(
+            f"InfluxDB 3 installation failed version validation for {edition} {version}; "
+            "reinstall with --reinstall"
+        )
+
+
 def validate_installation(path: Path, edition: str | None = None, version: str | None = None) -> dict[str, Any]:
     manifest = read_json(path / "manifest.json")
     required = {"schema_version", "kind", "edition", "version", "platform", "binary", "binary_sha256", "archive_sha256"}
-    if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("kind") != "influxdb3-installation" or not required.issubset(manifest):
+    schema_version = manifest.get("schema_version")
+    if schema_version not in (1, INSTALLATION_SCHEMA_VERSION) or manifest.get("kind") != "influxdb3-installation" or not required.issubset(manifest):
+        raise SetupError(f"malformed installation manifest: {path / 'manifest.json'}")
+    if schema_version == INSTALLATION_SCHEMA_VERSION and (
+        manifest.get("version_source") not in ("explicit", "official-installer")
+        or not isinstance(manifest.get("distribution_sha256"), str)
+    ):
         raise SetupError(f"malformed installation manifest: {path / 'manifest.json'}")
     if edition and manifest["edition"] != edition:
         raise SetupError("installation edition mismatch")
     if version and manifest["version"] != version:
         raise SetupError("installation version mismatch")
     binary = path / manifest["binary"]
-    if not binary.is_file() or sha256_file(binary) != manifest["binary_sha256"]:
+    if not binary.is_file() or not os.access(binary, os.X_OK) or sha256_file(binary) != manifest["binary_sha256"]:
         raise SetupError(f"installation binary checksum mismatch: {binary}")
+    if schema_version == INSTALLATION_SCHEMA_VERSION:
+        expected_distribution = manifest.get("distribution_sha256")
+        if not isinstance(expected_distribution, str) or distribution_sha256(path) != expected_distribution:
+            raise SetupError(f"installation distribution checksum mismatch: {path}")
+    verify_binary(binary, manifest["edition"], manifest["version"])
     return manifest
 
 
 def download(url: str, destination: Path) -> None:
     try:
-        with urllib.request.urlopen(url, timeout=60) as response, destination.open("wb") as output:
+        with urllib.request.urlopen(request(url), timeout=60) as response, destination.open("wb") as output:
             shutil.copyfileobj(response, output)
     except (OSError, urllib.error.URLError) as exc:
         raise SetupError(f"could not download {url}: {exc}") from exc
 
 
-def safe_extract_binary(archive: Path, destination: Path) -> Path:
+def safe_extract_distribution(archive: Path, destination: Path, expected_root: str) -> Path:
     with tarfile.open(archive, "r:gz") as bundle:
-        members = [member for member in bundle.getmembers() if Path(member.name).name == "influxdb3" and member.isfile()]
-        if len(members) != 1:
-            raise SetupError("archive must contain exactly one influxdb3 binary")
-        member = members[0]
-        source = bundle.extractfile(member)
-        if source is None:
-            raise SetupError("could not read influxdb3 binary from archive")
-        binary = destination / "influxdb3"
-        with binary.open("wb") as output:
-            shutil.copyfileobj(source, output)
-        binary.chmod(0o755)
-        return binary
+        members = bundle.getmembers()
+        if not members:
+            raise SetupError("archive is empty")
+        validated: list[tuple[tarfile.TarInfo, PurePosixPath]] = []
+        for member in members:
+            source_path = PurePosixPath(member.name)
+            if source_path.is_absolute() or not source_path.parts or source_path.parts[0] != expected_root:
+                raise SetupError("archive must contain exactly the expected top-level directory")
+            relative = PurePosixPath(*source_path.parts[1:])
+            if any(part in ("", ".", "..") for part in relative.parts):
+                raise SetupError(f"unsafe archive path: {member.name}")
+            if member.islnk() or member.isdev() or member.isfifo():
+                raise SetupError(f"unsupported archive member: {member.name}")
+            if not (member.isdir() or member.isfile() or member.issym()):
+                raise SetupError(f"unsupported archive member: {member.name}")
+            if member.issym():
+                link = PurePosixPath(member.linkname)
+                if link.is_absolute():
+                    raise SetupError(f"unsafe archive symlink: {member.name}")
+                resolved: list[str] = list(relative.parent.parts)
+                for part in link.parts:
+                    if part in ("", "."):
+                        continue
+                    if part == "..":
+                        if not resolved:
+                            raise SetupError(f"archive symlink escapes distribution: {member.name}")
+                        resolved.pop()
+                    else:
+                        resolved.append(part)
+            validated.append((member, relative))
+
+        for member, relative in validated:
+            if not relative.parts or not member.isdir():
+                continue
+            target = destination.joinpath(*relative.parts)
+            target.mkdir(parents=True, exist_ok=True)
+            target.chmod(member.mode & 0o7777)
+        for member, relative in validated:
+            if not relative.parts or not member.isfile():
+                continue
+            target = destination.joinpath(*relative.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = bundle.extractfile(member)
+            if source is None:
+                raise SetupError(f"could not read archive member: {member.name}")
+            with source, target.open("wb") as output:
+                shutil.copyfileobj(source, output)
+            target.chmod(member.mode & 0o7777)
+        for member, relative in validated:
+            if not relative.parts or not member.issym():
+                continue
+            target = destination.joinpath(*relative.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(member.linkname, target)
+
+    binary = destination / "influxdb3"
+    if not binary.is_file():
+        raise SetupError("archive must contain exactly one root influxdb3 binary")
+    return binary
 
 
 def install(args: argparse.Namespace) -> dict[str, Any]:
@@ -151,15 +302,19 @@ def install(args: argparse.Namespace) -> dict[str, Any]:
         actual = sha256_file(archive)
         if actual != expected:
             raise SetupError(f"archive checksum mismatch: expected {expected}, got {actual}")
-        binary = safe_extract_binary(archive, temporary)
+        expected_root = f"influxdb3-{args.edition}-{args.version}"
+        binary = safe_extract_distribution(archive, temporary, expected_root)
+        archive.unlink(); checksum_file.unlink()
         manifest = {
-            "schema_version": SCHEMA_VERSION, "kind": "influxdb3-installation",
+            "schema_version": INSTALLATION_SCHEMA_VERSION, "kind": "influxdb3-installation",
             "edition": args.edition, "version": args.version, "platform": target,
+            "version_source": args.version_source,
             "created_at": utc_now(), "source_url": f"{BASE_URL}/{name}",
             "archive_sha256": actual, "binary": binary.name,
             "binary_sha256": sha256_file(binary),
+            "distribution_sha256": distribution_sha256(temporary),
         }
-        archive.unlink(); checksum_file.unlink(); save_json(temporary / "manifest.json", manifest)
+        save_json(temporary / "manifest.json", manifest)
         validate_installation(temporary, args.edition, args.version)
         if destination.exists():
             backup = destination.with_name(f".{destination.name}.old-{os.getpid()}")
@@ -213,6 +368,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     manifest = {
         "schema_version": SCHEMA_VERSION, "kind": "influxdb3-instance",
         "instance_id": args.instance_id, "edition": args.edition, "version": args.version,
+        "version_source": args.version_source,
         "installation_path": str(installation), "binary_sha256": installed["binary_sha256"],
         "node_id": f"{stem}-node", "cluster_id": f"{stem}-cluster" if args.edition == "enterprise" else None,
         "created_at": utc_now(), "updated_at": utc_now(), "license": {"status": "not-required" if args.edition == "core" else "unconfigured", "source": None},
@@ -297,8 +453,8 @@ def print_value(value: Any) -> None:
 
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__); sub = parser.add_subparsers(dest="command", required=True)
-    install_parser = sub.add_parser("install"); install_parser.add_argument("--edition", choices=("core", "enterprise"), required=True); install_parser.add_argument("--version", required=True); install_parser.add_argument("--install-root", type=Path); install_parser.add_argument("--reinstall", action="store_true")
-    prepare_parser = sub.add_parser("prepare"); prepare_parser.add_argument("--instance-id", required=True); prepare_parser.add_argument("--edition", choices=("core", "enterprise"), required=True); prepare_parser.add_argument("--version", required=True); prepare_parser.add_argument("--install-root", type=Path); prepare_parser.add_argument("--instance-root", type=Path)
+    install_parser = sub.add_parser("install"); install_parser.add_argument("--edition", choices=("core", "enterprise"), required=True); install_parser.add_argument("--version"); install_parser.add_argument("--install-root", type=Path); install_parser.add_argument("--reinstall", action="store_true")
+    prepare_parser = sub.add_parser("prepare"); prepare_parser.add_argument("--instance-id", required=True); prepare_parser.add_argument("--edition", choices=("core", "enterprise"), required=True); prepare_parser.add_argument("--version"); prepare_parser.add_argument("--install-root", type=Path); prepare_parser.add_argument("--instance-root", type=Path)
     activate_parser = sub.add_parser("activate"); activate_parser.add_argument("--instance-id", required=True); activate_parser.add_argument("--instance-root", type=Path); license_group = activate_parser.add_mutually_exclusive_group(required=True); license_group.add_argument("--license-file", type=Path); license_group.add_argument("--license-type", choices=("trial", "home")); activate_parser.add_argument("--license-email-env", default="INFLUXDB3_LICENSE_EMAIL"); activate_parser.add_argument("--http-port", type=int, default=8181); activate_parser.add_argument("--activation-timeout", type=int, default=600)
     list_parser = sub.add_parser("list"); list_parser.add_argument("--instance-root", type=Path)
     inspect_parser = sub.add_parser("inspect"); inspect_parser.add_argument("--instance-id", required=True); inspect_parser.add_argument("--instance-root", type=Path)
@@ -307,8 +463,8 @@ def make_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if hasattr(args, "version") and not VERSION_RE.fullmatch(args.version):
-        raise SetupError("--version must be an exact semantic version such as 3.11.1")
+    if hasattr(args, "version") and args.version is not None and not VERSION_RE.fullmatch(args.version):
+        raise SetupError("--version must be omitted or be an exact semantic version such as 3.11.1")
     if hasattr(args, "instance_id") and not ID_RE.fullmatch(args.instance_id):
         raise SetupError("--instance-id contains invalid characters")
     if args.command == "activate":
@@ -322,6 +478,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = make_parser().parse_args(argv)
     try:
         validate_args(args)
+        if args.command in ("install", "prepare"):
+            resolve_args_version(args)
         if args.command == "install": value = install(args)
         elif args.command == "prepare": value = prepare(args)
         elif args.command == "activate": value = activate(args)

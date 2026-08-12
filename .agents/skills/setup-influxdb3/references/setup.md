@@ -4,13 +4,21 @@
 
 ```text
 .benchmarks/influxdb3/
-├── installations/<edition>/<version>/<platform>/{manifest.json,influxdb3}
+├── installations/<edition>/<version>/<platform>/{manifest.json,influxdb3,python/,...}
 └── instances/<instance-id>/{manifest.json,data/,logs/}
 ```
 
 Installations and instances are reusable and checksum validated. Core and
 Enterprise artifacts use the official archive pattern
 `influxdb3-<edition>-<version>_<platform>.tar.gz` and its adjacent `.sha256`.
+The complete vendor distribution is retained because the executable depends on
+its adjacent bundled Python runtime. Reuse validates both the distribution
+checksum and `influxdb3 --version`.
+
+When `--version` is omitted, `install` and `prepare` parse the edition-specific
+version variable from InfluxData's official quick-installer script without
+executing it. Resolution failures do not fall back to a cached or guessed
+version; pass an exact version for offline or reproducible operation.
 
 Supported native platforms are Linux AMD64, Linux ARM64, and macOS ARM64.
 Intel macOS and Windows are intentionally unsupported by the managed workflow.

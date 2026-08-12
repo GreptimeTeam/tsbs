@@ -1,6 +1,6 @@
 ---
 name: setup-influxdb3
-description: Install checksum-verified, version-pinned InfluxDB 3 Core or Enterprise native binaries and prepare reusable local benchmark instances. Use for local InfluxDB 3 installation, instance setup, Enterprise trial/home activation, license-file setup, installation verification, or locating a managed binary for TSBS.
+description: Install checksum-verified latest or version-pinned InfluxDB 3 Core or Enterprise native distributions and prepare reusable local benchmark instances. Use for local InfluxDB 3 installation, instance setup, Enterprise trial/home activation, license-file setup, installation verification, or locating a managed binary for TSBS.
 ---
 
 # Setup InfluxDB 3
@@ -9,27 +9,29 @@ Use `scripts/setup.py` for deterministic installation and instance management.
 Read `references/setup.md` before choosing an edition, version, platform, or
 Enterprise license flow. Use `$benchmark-influxdb3` after preparing an instance.
 
-## Install an exact version
+## Install the official latest or an exact version
 
 Run from the repository root:
 
 ```bash
 python3 .agents/skills/setup-influxdb3/scripts/setup.py install \
-  --edition core --version 3.11.1
+  --edition core
 
 python3 .agents/skills/setup-influxdb3/scripts/setup.py install \
   --edition enterprise --version 3.11.1
 ```
 
-Always use an exact version. Resolve a request for “latest” from official
-InfluxData release documentation first, then pass the resolved version. The
-installer verifies the vendor SHA-256 file and publishes atomically.
+Omitting `--version` resolves the edition-specific latest version from the
+official InfluxData installer without executing it. Pass an exact semantic
+version for deterministic setup; the literal value `latest` is invalid. The
+installer verifies the vendor SHA-256 and complete extracted distribution,
+checks `influxdb3 --version`, and publishes atomically.
 
 ## Prepare an instance
 
 ```bash
 python3 .agents/skills/setup-influxdb3/scripts/setup.py prepare \
-  --instance-id core-311 --edition core --version 3.11.1
+  --instance-id core-latest --edition core
 
 python3 .agents/skills/setup-influxdb3/scripts/setup.py prepare \
   --instance-id enterprise-311 --edition enterprise --version 3.11.1
@@ -37,6 +39,8 @@ python3 .agents/skills/setup-influxdb3/scripts/setup.py prepare \
 
 Instances use a file object store and stable node/cluster identifiers. Existing
 instances are immutable with respect to edition, version, and binary checksum.
+Omitting `--version` resolves the official latest at command execution time;
+it never upgrades an existing instance automatically.
 
 ## Activate Enterprise
 
