@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import datetime as dt
-import fcntl
 import hashlib
 import json
 import os
@@ -24,10 +22,29 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+SCRIPT_PATH = Path(__file__).resolve()
+sys.path.insert(0, str(SCRIPT_PATH.parents[3] / "lib"))
+
+from tsbs_benchmark import (  # noqa: E402
+    PROFILES,
+    QUERY_TYPES,
+    add_one_second,
+    build_workload,
+    canonical_json,
+    dataset_binding,
+    lock_directory,
+    new_run_dir as shared_new_run_dir,
+    next_attempt,
+    query_file_path,
+    read_json as shared_read_json,
+    relative,
+    save_json,
+    sha256_file,
+    utc_now,
+)
 from summarize import write_summary
 
 
-SCRIPT_PATH = Path(__file__).resolve()
 REPO_ROOT = SCRIPT_PATH.parents[4]
 BENCHMARK_ROOT = REPO_ROOT / ".benchmarks"
 DEFAULT_RUN_ROOT = BENCHMARK_ROOT / "greptimedb" / "runs"
@@ -39,29 +56,6 @@ DEFAULT_DATABASE = "benchmark"
 SCHEMA_VERSION = 1
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DATA_WORKLOAD_OPTIONS = ("start", "end", "scale", "seed", "log_interval")
-
-QUERY_COUNTS_MANUAL = {
-    "cpu-max-all-1": 100, "cpu-max-all-8": 100, "double-groupby-1": 50,
-    "double-groupby-5": 50, "double-groupby-all": 50, "groupby-orderby-limit": 50,
-    "high-cpu-1": 100, "high-cpu-all": 50, "lastpoint": 10,
-    "single-groupby-1-1-1": 100, "single-groupby-1-1-12": 100,
-    "single-groupby-1-8-1": 100, "single-groupby-5-1-1": 100,
-    "single-groupby-5-1-12": 100, "single-groupby-5-8-1": 100,
-}
-QUERY_TYPES = tuple(QUERY_COUNTS_MANUAL)
-PROFILES = {
-    "manual": {
-        "start": "2023-06-11T00:00:00Z", "end": "2023-06-14T00:00:00Z",
-        "scale": 4000, "seed": 123, "log_interval": "10s", "load_workers": 6,
-        "query_workers": 1, "batch_size": 3000, "query_counts": QUERY_COUNTS_MANUAL,
-    },
-    "smoke": {
-        "start": "2023-06-11T00:00:00Z", "end": "2023-06-12T00:00:00Z",
-        "scale": 10, "seed": 123, "log_interval": "10s", "load_workers": 2,
-        "query_workers": 1, "batch_size": 3000,
-        "query_counts": {query_type: 10 for query_type in QUERY_TYPES},
-    },
-}
 BINARIES = {"queries": "tsbs_generate_queries", "load": "tsbs_load_greptime", "query": "tsbs_run_queries_influx"}
 BUILT_THIS_PROCESS: set[str] = set()
 
@@ -70,55 +64,12 @@ class BenchmarkError(RuntimeError):
     """Raised for an actionable benchmark failure."""
 
 
-def utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def save_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.tmp-{os.getpid()}")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
-
-
 def read_json(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise BenchmarkError(f"missing manifest: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise BenchmarkError(f"invalid JSON manifest {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise BenchmarkError(f"manifest must be an object: {path}")
-    return value
+    return shared_read_json(path, BenchmarkError)
 
 
 def new_run_dir(run_root: Path = DEFAULT_RUN_ROOT) -> Path:
-    run_root.mkdir(parents=True, exist_ok=True)
-    base = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    candidate = run_root / base
-    suffix = 1
-    while candidate.exists():
-        candidate = run_root / f"{base}-{suffix:02d}"
-        suffix += 1
-    return candidate
-
-
-def add_one_second(timestamp: str) -> str:
-    parsed = dt.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    return (parsed + dt.timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+    return shared_new_run_dir(run_root)
 
 
 def validate_run_manifest(manifest: dict[str, Any], path: Path) -> None:
@@ -176,25 +127,6 @@ def prepare_run(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         raise BenchmarkError("--database conflicts with the database pinned by this run")
     save_manifest(run_dir, manifest)
     return run_dir, manifest
-
-
-def build_workload(args: argparse.Namespace, base: dict[str, Any] | None = None) -> dict[str, Any]:
-    if base is not None and not args.profile:
-        workload = json.loads(json.dumps(base))
-    else:
-        workload = json.loads(json.dumps(PROFILES[args.profile or "manual"]))
-    for attr in ("start", "end", "scale", "seed", "log_interval", "load_workers", "query_workers", "batch_size"):
-        value = getattr(args, attr, None)
-        if value is not None:
-            workload[attr] = value
-    selected = sorted(set(args.query_type or workload["query_counts"]))
-    count_override = getattr(args, "queries", None)
-    workload["query_counts"] = {query_type: count_override if count_override is not None else workload["query_counts"][query_type] for query_type in selected}
-    return workload
-
-
-def relative(run_dir: Path, path: Path) -> str:
-    return str(path.relative_to(run_dir))
 
 
 def display_command(command: Sequence[str]) -> str:
@@ -316,10 +248,6 @@ def query_set_path(query_root: Path, dataset_id: str, set_id: str) -> Path:
     return query_root / dataset_id / "greptime" / set_id
 
 
-def query_file_path(query_dir: Path, query_type: str) -> Path:
-    return query_dir / "queries" / f"{query_type}.dat"
-
-
 def validate_query_set(query_dir: Path, expected_spec: dict[str, Any]) -> dict[str, Any]:
     manifest_path = query_dir / "manifest.json"; manifest = read_json(manifest_path)
     required = {"schema_version", "kind", "query_set_id", "created_at", "spec", "generator", "files"}
@@ -435,22 +363,8 @@ def prepare_database_workspace(args: argparse.Namespace) -> tuple[Path, dict[str
 
 @contextlib.contextmanager
 def lock_database(path: Path) -> Iterator[None]:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        try: fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc: raise BenchmarkError(f"managed database workspace is locked: {path}") from exc
+    with lock_directory(path, BenchmarkError, "managed database workspace"):
         yield
-    finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN); os.close(descriptor)
-
-
-def dataset_binding(dataset: dict[str, Any]) -> dict[str, Any]:
-    return {"dataset_id": dataset["dataset_id"], "spec": dataset["spec"], "format": dataset["format"], "bytes": dataset["bytes"], "sha256": dataset["sha256"]}
-
-
-def next_attempt(events: Sequence[dict[str, Any]], query_type: str | None = None) -> int:
-    matching = [event for event in events if query_type is None or event.get("query_type") == query_type]
-    return max((int(event["attempt"]) for event in matching), default=0) + 1
 
 
 def load_data(args: argparse.Namespace, run_dir: Path, manifest: dict[str, Any], endpoint: str, managed: bool, database_manifest: dict[str, Any] | None = None, database_path: Path | None = None) -> None:
