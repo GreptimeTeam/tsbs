@@ -345,6 +345,16 @@ def validate_database_manifest(path: Path, expected_id: str | None = None) -> di
     binding_fields = {"dataset_id", "spec", "format", "bytes", "sha256"}
     if binding is not None and (not isinstance(binding, dict) or set(binding) != binding_fields or not isinstance(binding.get("spec"), dict)):
         raise BenchmarkError(f"malformed database binding: {path / 'manifest.json'}")
+    setup_fields = {"version", "version_source", "platform", "installation_path", "binary_sha256"}
+    present = setup_fields.intersection(manifest)
+    if present and present != setup_fields:
+        raise BenchmarkError(f"incomplete setup identity in database manifest: {path / 'manifest.json'}")
+    if present:
+        if not all(isinstance(manifest[field], str) and manifest[field] for field in setup_fields):
+            raise BenchmarkError(f"malformed setup identity in database manifest: {path / 'manifest.json'}")
+        binary = Path(manifest["installation_path"]) / "greptime"
+        if not binary.is_file() or not os.access(binary, os.X_OK) or sha256_file(binary) != manifest["binary_sha256"]:
+            raise BenchmarkError(f"prepared GreptimeDB binary checksum mismatch: {binary}")
     return manifest
 
 
@@ -355,10 +365,24 @@ def prepare_database_workspace(args: argparse.Namespace) -> tuple[Path, dict[str
         if manifest["database"] != args.database:
             raise BenchmarkError("managed workspace is bound to a different SQL database")
     else:
+        if not args.greptime_bin:
+            raise BenchmarkError(f"prepared managed workspace does not exist: {path}; create it with $setup-greptimedb")
         (path / "data").mkdir(parents=True, exist_ok=True); (path / "logs").mkdir(parents=True, exist_ok=True)
         manifest = {"schema_version": SCHEMA_VERSION, "kind": "greptimedb-database", "database_id": args.database_id, "created_at": utc_now(), "updated_at": utc_now(), "database": args.database, "binding": None}
         save_json(manifest_path, manifest)
     return path, manifest
+
+
+def managed_binary(args: argparse.Namespace, manifest: dict[str, Any]) -> Path:
+    prepared_path = manifest.get("installation_path")
+    if prepared_path:
+        prepared = Path(prepared_path) / "greptime"
+        if args.greptime_bin and args.greptime_bin.expanduser().resolve() != prepared.resolve():
+            raise BenchmarkError("--greptime-bin conflicts with the binary bound to the prepared database workspace")
+        return prepared.resolve()
+    if not args.greptime_bin:
+        raise BenchmarkError("legacy managed workspace requires --greptime-bin; prepare it with $setup-greptimedb for automatic binary discovery")
+    return args.greptime_bin.expanduser().resolve()
 
 
 @contextlib.contextmanager
@@ -426,12 +450,11 @@ def check_port_available(port: int) -> None:
 
 @contextlib.contextmanager
 def connection(args: argparse.Namespace, run_dir: Path) -> Iterator[tuple[str, bool, dict[str, Any] | None, Path | None]]:
-    if bool(args.greptime_bin) == bool(args.endpoint): raise BenchmarkError("provide exactly one of --greptime-bin or --endpoint")
     if args.endpoint:
         yield args.endpoint.rstrip("/"), False, None, None; return
     workspace, database_manifest = prepare_database_workspace(args)
     with lock_database(workspace):
-        binary = args.greptime_bin.resolve()
+        binary = managed_binary(args, database_manifest)
         if not binary.is_file() or not os.access(binary, os.X_OK): raise BenchmarkError(f"GreptimeDB binary is not executable: {binary}")
         check_port_available(args.http_port); endpoint = f"http://127.0.0.1:{args.http_port}"; process_log_path = run_dir / "logs" / "greptimedb-process.log"; process_log = process_log_path.open("a", encoding="utf-8")
         command = [str(binary), "standalone", "start", "--http-addr", f"127.0.0.1:{args.http_port}", "--influxdb-enable", "--data-home", str(workspace / "data"), "--log-dir", str(workspace / "logs")]
@@ -487,8 +510,8 @@ def validate_args(args: argparse.Namespace) -> None:
         value = getattr(args, name, None)
         if value and not ID_RE.fullmatch(value): raise BenchmarkError(f"--{name.replace('_', '-')} contains invalid characters")
     if args.command in ("load", "query", "all"):
-        if bool(args.greptime_bin) == bool(args.endpoint): raise BenchmarkError("provide exactly one of --greptime-bin or --endpoint")
-        if args.greptime_bin and not args.database_id: raise BenchmarkError("managed GreptimeDB requires --database-id")
+        if args.endpoint and (args.greptime_bin or args.database_id): raise BenchmarkError("external GreptimeDB cannot use --greptime-bin or --database-id")
+        if not args.endpoint and not args.database_id: raise BenchmarkError("provide --database-id for managed GreptimeDB or --endpoint for external GreptimeDB")
         if args.endpoint and args.database_id: raise BenchmarkError("--database-id is only valid with managed GreptimeDB")
         if args.endpoint:
             parsed = urllib.parse.urlparse(args.endpoint)
@@ -512,7 +535,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.only in ("all", "queries"): generate_queries(args, run_dir, manifest)
         elif args.command in ("load", "query", "all"):
             with connection(args, run_dir) as (endpoint, managed, database_manifest, database_path):
-                manifest["target"] = {"mode": "managed" if managed else "external", "endpoint": endpoint, "database": args.database, "database_id": args.database_id if managed else None}; save_manifest(run_dir, manifest)
+                manifest["target"] = {"mode": "managed" if managed else "external", "endpoint": endpoint, "database": args.database, "database_id": args.database_id if managed else None, "version": database_manifest.get("version") if database_manifest else None, "binary_sha256": database_manifest.get("binary_sha256") if database_manifest else None}; save_manifest(run_dir, manifest)
                 if args.command in ("load", "all"): load_data(args, run_dir, manifest, endpoint, managed, database_manifest, database_path)
                 if args.command in ("query", "all"): run_queries(args, run_dir, manifest, endpoint, database_manifest)
         summary = write_summary(run_dir, manifest); print(f"Run directory: {run_dir}"); print(f"Summary: {run_dir / 'summary.md'}"); return 1 if summary["failures"] else 0

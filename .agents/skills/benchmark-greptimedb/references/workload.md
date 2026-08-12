@@ -9,6 +9,7 @@
 │   ├── manifest.json
 │   └── queries/<query-type>.dat
 └── greptimedb/
+    ├── installations/<version>/<platform>/{manifest.json,greptime,...}
     ├── databases/<database-id>/{manifest.json,data/,logs/}
     └── runs/<run-id>/{manifest.json,logs/,results/,summary.json,summary.md}
 ```
@@ -58,7 +59,9 @@ The query generator receives the end timestamp plus one second.
 ## Database state
 
 Managed workspace manifests bind `database_id`, SQL database name, and one
-loaded dataset specification/checksum. A matching dataset is reused. A
+loaded dataset specification/checksum. Workspaces prepared by
+`$setup-greptimedb` additionally bind an exact installation version, platform,
+path, and binary checksum. A matching dataset is reused. A
 different dataset requires a successfully confirmed reset before the binding
 changes. External `create`, `reuse`, and `reset` map to the corresponding TSBS
 loader flags; external reuse may duplicate data.

@@ -25,7 +25,7 @@ class SummaryIntegrationTests(unittest.TestCase):
                     "run_id": "run",
                     "profile": "smoke",
                     "database": "benchmark",
-                    "target": {"mode": "managed", "database_id": "db-a"},
+                    "target": {"mode": "managed", "database_id": "db-a", "version": "1.1.4", "binary_sha256": "def"},
                     "dataset": {"dataset_id": "data-a"},
                     "query_set": {
                         "query_set_id": "set-a",
@@ -37,6 +37,8 @@ class SummaryIntegrationTests(unittest.TestCase):
 
         rendered = summarize.render_markdown(summary)
         self.assertIn("managed:db-a", rendered)
+        self.assertIn("GreptimeDB version: `1.1.4`", rendered)
+        self.assertIn("GreptimeDB binary SHA-256: `def`", rendered)
         self.assertIn("set-a", rendered)
 
 
@@ -212,6 +214,40 @@ class ManagedDatabaseTests(unittest.TestCase):
         benchmark.resolve_database(args)
         with self.assertRaisesRegex(benchmark.BenchmarkError, "database-id"):
             benchmark.validate_args(args)
+
+    def test_prepared_workspace_discovers_and_validates_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); installation = root / "installations/1.1.4/linux_amd64"; installation.mkdir(parents=True)
+            binary = installation / "greptime"; binary.write_text("#!/bin/sh\n", encoding="utf-8"); binary.chmod(0o755)
+            database = root / "databases/db-a"; (database / "data").mkdir(parents=True); (database / "logs").mkdir()
+            benchmark.save_json(database / "manifest.json", {
+                "schema_version": 1, "kind": "greptimedb-database", "database_id": "db-a",
+                "created_at": benchmark.utc_now(), "database": "benchmark", "binding": None,
+                "version": "1.1.4", "version_source": "explicit", "platform": "linux_amd64",
+                "installation_path": str(installation), "binary_sha256": benchmark.sha256_file(binary),
+            })
+            args = benchmark.make_parser().parse_args(["query", "--database-id", "db-a", "--database-root", str(root / "databases"), "--database", "benchmark"])
+            manifest = benchmark.validate_database_manifest(database, "db-a")
+            self.assertEqual(benchmark.managed_binary(args, manifest), binary.resolve())
+            explicit = benchmark.make_parser().parse_args(["query", "--greptime-bin", "/bin/true", "--database-id", "db-a", "--database-root", str(root / "databases"), "--database", "benchmark"])
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "conflicts"):
+                benchmark.managed_binary(explicit, manifest)
+            binary.write_text("corrupt", encoding="utf-8")
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "checksum mismatch"):
+                benchmark.validate_database_manifest(database, "db-a")
+
+    def test_legacy_workspace_requires_explicit_binary(self) -> None:
+        manifest = {"database_id": "db-a", "database": "benchmark", "binding": None}
+        args = benchmark.make_parser().parse_args(["query", "--database-id", "db-a", "--database", "benchmark"])
+        with self.assertRaisesRegex(benchmark.BenchmarkError, "legacy managed workspace"):
+            benchmark.managed_binary(args, manifest)
+
+    def test_missing_prepared_workspace_does_not_create_legacy_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); args = benchmark.make_parser().parse_args(["query", "--database-id", "db-a", "--database-root", str(root), "--database", "benchmark"])
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "does not exist"):
+                benchmark.prepare_database_workspace(args)
+            self.assertFalse((root / "db-a").exists())
 
 
 if __name__ == "__main__":
