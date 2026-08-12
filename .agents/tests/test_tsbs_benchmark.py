@@ -145,13 +145,115 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(summary["queries"][0]["query_count"], 40)
         self.assertEqual(summary["queries"][0]["weighted_mean_milliseconds"], 3.5)
 
-    def test_legacy_query_log_remains_supported(self) -> None:
-        parsed = shared.parse_query_log(
-            "Run complete after 10 queries\nall queries:\n"
-            "min: 1ms, mean: 3.50ms, max: 4ms, count: 10\n"
+    def test_reused_load_does_not_require_a_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            summary = shared.build_summary(
+                Path(temp),
+                {
+                    "events": {
+                        "loads": [
+                            {
+                                "attempt": 1,
+                                "database": "benchmark",
+                                "database_mode": "reuse",
+                                "status": "reused",
+                            }
+                        ],
+                        "queries": [],
+                    }
+                },
+            )
+
+        self.assertEqual(summary["ingestion_runs"], [])
+        self.assertEqual(summary["failures"], [])
+
+    def test_legacy_result_uses_log_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            self.write_json(
+                run_dir,
+                "results/query.json",
+                {"ResultFormatVersion": "0.1", "Totals": {}},
+            )
+            log = run_dir / "logs/query.log"
+            log.parent.mkdir()
+            log.write_text(
+                "Run complete after 10 queries\nall queries:\n"
+                "min: 1ms, mean: 3.50ms, max: 4ms, count: 10\n",
+                encoding="utf-8",
+            )
+            summary = shared.build_summary(
+                run_dir,
+                {
+                    "events": {
+                        "loads": [],
+                        "queries": [
+                            {
+                                "query_type": "lastpoint",
+                                "attempt": 1,
+                                "database": "benchmark",
+                                "status": "completed",
+                                "log": "logs/query.log",
+                                "results": "results/query.json",
+                            }
+                        ],
+                    }
+                },
+            )
+
+        self.assertEqual(summary["failures"], [])
+        self.assertEqual(summary["queries"][0]["weighted_mean_milliseconds"], 3.5)
+
+    def test_invalid_current_result_is_reported_as_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            self.write_json(
+                run_dir,
+                "results/query.json",
+                {"ResultFormatVersion": "0.2", "Totals": {"overallStats": {}}},
+            )
+            event = {
+                "query_type": "lastpoint",
+                "attempt": 1,
+                "database": "benchmark",
+                "status": "completed",
+                "log": "logs/query.log",
+                "results": "results/query.json",
+            }
+            incomplete = shared.build_summary(
+                run_dir, {"events": {"loads": [], "queries": [event]}}
+            )
+
+            (run_dir / "results/query.json").write_text(
+                "{not-json", encoding="utf-8"
+            )
+            malformed = shared.build_summary(
+                run_dir, {"events": {"loads": [], "queries": [event]}}
+            )
+
+        self.assertEqual(incomplete["queries"], [])
+        self.assertIn("all_queries", incomplete["failures"][0]["reason"])
+        self.assertIn("malformed result JSON", malformed["failures"][0]["reason"])
+
+    def test_load_parsers_preserve_optional_row_metrics(self) -> None:
+        structured = shared.parse_load_result(
+            {
+                "DurationMillis": 2000,
+                "Totals": {
+                    "metricCount": 200,
+                    "metricRate": 100.0,
+                    "rowCount": 0,
+                    "rowRate": 0.0,
+                },
+            }
+        )
+        legacy = shared.parse_load_log(
+            "loaded 200 metrics in 2.000sec (mean rate 100.00 metrics/sec)\n"
+            "loaded 40 rows in 2.000sec (mean rate 20.00 rows/sec)\n"
         )
 
-        self.assertEqual(parsed, {"mean_milliseconds": 3.5, "count": 10})
+        self.assertNotIn("rows", structured)
+        self.assertEqual(legacy["rows_per_second"], 20.0)
 
 
 if __name__ == "__main__":
