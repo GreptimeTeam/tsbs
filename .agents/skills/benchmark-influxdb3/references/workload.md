@@ -48,3 +48,10 @@ labeling the difference.
 Before binding a managed instance to a SQL database, the runner verifies that
 its pinned executable starts for `--version` and reports the expected edition
 and exact version. Repair incomplete installations with `$setup-influxdb3`.
+
+Each managed-server attempt has its own process log and lifecycle event with
+start, readiness, shutdown, exit-code, and forced/unexpected-exit state. The
+summary reports capped, email-redacted warning/error/fatal/panic samples.
+Warnings and recoverable errors remain diagnostic; fatal/panic output, startup
+failure, unexpected exit, or forced kill fail the run. Port probes retry briefly
+with address reuse enabled while continuing to reject active listeners.

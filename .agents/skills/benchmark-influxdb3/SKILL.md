@@ -71,4 +71,7 @@ to the same instance or cluster.
 
 Read `summary.json` and report edition, version, instance or URLs, dataset and
 query-set checksums, durability flags, metrics/second and rows/second, weighted
-mean query latency, failures and log paths, and the run directory.
+mean query latency, server diagnostics, failures and log paths, and the run
+directory. Ordinary server warnings and recoverable errors are diagnostics;
+fatal/panic output, startup failures, unexpected exits, and forced shutdowns
+are benchmark failures.

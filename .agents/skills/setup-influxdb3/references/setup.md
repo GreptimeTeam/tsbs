@@ -34,4 +34,11 @@ Intel macOS and Windows are intentionally unsupported by the managed workflow.
 Enterprise requires an active license. Trial/home activation supplies the email
 and license type only to the server process; neither value is written to the
 instance manifest. A license-file setup records only its absolute path and
-never copies or reads the JWT contents.
+never copies or reads the JWT contents. Use `--license-email-stdin` for a
+one-line secret input; it overrides the compatible environment-variable path.
+Activation logs redact both the supplied value and email-shaped text while
+streaming, then receive a final scrub on cleanup.
+
+Port probes enable `SO_REUSEADDR` and retry briefly so a recently stopped local
+server in TCP `TIME_WAIT` does not cause a false conflict. An active listener is
+still rejected.

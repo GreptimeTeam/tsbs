@@ -13,6 +13,12 @@ from typing import Any, Callable
 
 RESULT_FORMAT_VERSION = "0.2"
 LEGACY_RESULT_FORMAT_VERSION = "0.1"
+MAX_SERVER_DIAGNOSTIC_SAMPLES = 20
+EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![\w.-])")
+PANIC_RE = re.compile(r"\bpanic(?:ked)?\b|fatal runtime error", re.IGNORECASE)
+FATAL_RE = re.compile(r"\bfatal\b", re.IGNORECASE)
+ERROR_RE = re.compile(r"(?:^|\s)ERROR(?:\s|$)", re.IGNORECASE)
+WARNING_RE = re.compile(r"(?:^|\s)WARN(?:ING)?(?:\s|$)|<jemalloc>:", re.IGNORECASE)
 
 
 METRIC_RE = re.compile(
@@ -158,6 +164,42 @@ def _parse_event(
     return log_parser(_read_log(run_dir, event["log"]))
 
 
+def server_diagnostics(run_dir: Path, manifest: dict[str, Any], failures: list[dict[str, str]]) -> dict[str, Any]:
+    counts = {"warning": 0, "error": 0, "fatal": 0, "panic": 0}
+    samples: list[dict[str, str]] = []
+    attempts: list[dict[str, Any]] = []
+    failing_statuses = {"starting", "startup_failed", "startup_timeout", "unexpected_exit", "forced_shutdown"}
+    for event in manifest.get("events", {}).get("servers", []):
+        log = event.get("log", "")
+        attempt = {key: event.get(key) for key in ("attempt", "log", "status", "started_at", "ready_at", "finished_at", "exit_code", "forced_shutdown", "unexpected_exit")}
+        attempts.append(attempt)
+        status = event.get("status", "unknown")
+        if status in failing_statuses or event.get("unexpected_exit") or event.get("forced_shutdown"):
+            failures.append({"stage": "server", "log": log, "reason": status})
+        try:
+            lines = _read_log(run_dir, log).splitlines()
+        except OSError as exc:
+            failures.append({"stage": "server", "log": log, "reason": str(exc)})
+            continue
+        fatal_or_panic = False
+        for raw_line in lines:
+            line = EMAIL_RE.sub("<redacted-email>", raw_line.strip())
+            severity = None
+            if PANIC_RE.search(line): severity = "panic"
+            elif FATAL_RE.search(line): severity = "fatal"
+            elif ERROR_RE.search(line): severity = "error"
+            elif WARNING_RE.search(line): severity = "warning"
+            if severity is None:
+                continue
+            counts[severity] += 1
+            if len(samples) < MAX_SERVER_DIAGNOSTIC_SAMPLES:
+                samples.append({"severity": severity, "log": log, "message": line})
+            fatal_or_panic = fatal_or_panic or severity in ("fatal", "panic")
+        if fatal_or_panic:
+            failures.append({"stage": "server", "log": log, "reason": "server log contains fatal or panic diagnostics"})
+    return {**{f"{name}_count": value for name, value in counts.items()}, "samples": samples, "attempts": attempts}
+
+
 def build_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     failures: list[dict[str, str]] = []
     ingestion_runs: list[dict[str, Any]] = []
@@ -222,6 +264,7 @@ def build_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
+    diagnostics = server_diagnostics(run_dir, manifest, failures)
     return {
         "run_id": manifest.get("run_id", run_dir.name),
         "profile": manifest.get("profile"),
@@ -232,6 +275,7 @@ def build_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         "workload": manifest.get("workload", {}),
         "ingestion_runs": ingestion_runs,
         "queries": queries,
+        "server_diagnostics": diagnostics,
         "failures": failures,
     }
 
@@ -304,6 +348,18 @@ def render_markdown(summary: dict[str, Any]) -> str:
             )
     else:
         lines.append("No completed query runs.")
+
+    diagnostics = summary.get("server_diagnostics", {})
+    lines.extend(["", "## Server diagnostics", ""])
+    lines.append(
+        f"Warnings: {diagnostics.get('warning_count', 0)}; errors: {diagnostics.get('error_count', 0)}; "
+        f"fatals: {diagnostics.get('fatal_count', 0)}; panics: {diagnostics.get('panic_count', 0)}."
+    )
+    if diagnostics.get("samples"):
+        lines.extend(["", "| Severity | Log | Sample |", "| --- | --- | --- |"])
+        for sample in diagnostics["samples"]:
+            message = sample["message"].replace("|", "\\|")
+            lines.append(f"| {sample['severity']} | `{sample['log']}` | {message} |")
 
     if summary["failures"]:
         lines.extend(["", "## Failures", "", "| Stage | Log | Reason |", "| --- | --- | --- |"])

@@ -53,9 +53,19 @@ python3 .agents/skills/setup-influxdb3/scripts/setup.py activate \
   --instance-id enterprise-311 --license-type trial
 ```
 
+Prefer `--license-email-stdin` when supplying the email interactively or from a
+secret pipe. It takes precedence over the environment variable, reads exactly
+one line, and uses a non-echoing prompt on a terminal:
+
+```bash
+python3 .agents/skills/setup-influxdb3/scripts/setup.py activate \
+  --instance-id enterprise-311 --license-type home --license-email-stdin
+```
+
 Alternatively pass `--license-file /absolute/path/license.jwt`. Override the
-email variable name with `--license-email-env`. Never record or repeat the email
-or license contents. Preserve activation logs on failure and
+email variable name with `--license-email-env`. Activation output is redacted
+while it is streamed and scrubbed again during cleanup. Never record or repeat
+the email or license contents. Preserve activation logs on failure and
 rerun activation safely after verification.
 
 ## Inspect and verify

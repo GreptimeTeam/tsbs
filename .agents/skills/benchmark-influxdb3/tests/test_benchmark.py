@@ -45,6 +45,29 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary["ingestion_runs"], [])
         self.assertEqual(summary["failures"], [])
 
+    def test_server_warnings_are_diagnostics_but_fatal_output_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp); logs = run_dir / "logs"; logs.mkdir()
+            (logs / "server-1.log").write_text(" WARN retrying for person@example.com\n ERROR request recovered\n")
+            manifest = {"events": {"loads": [], "queries": [], "servers": [{"attempt": 1, "log": "logs/server-1.log", "status": "stopped"}]}}
+            summary = summarize.build_summary(run_dir, manifest)
+            self.assertEqual(summary["failures"], [])
+            self.assertEqual(summary["server_diagnostics"]["warning_count"], 1)
+            self.assertEqual(summary["server_diagnostics"]["error_count"], 1)
+            self.assertNotIn("person@example.com", json.dumps(summary))
+
+            (logs / "server-1.log").write_text("thread worker panicked at secret@example.com\n")
+            failed = summarize.build_summary(run_dir, manifest)
+            self.assertEqual(failed["failures"][0]["stage"], "server")
+            self.assertEqual(failed["server_diagnostics"]["panic_count"], 1)
+
+    def test_server_lifecycle_failure_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp); logs = run_dir / "logs"; logs.mkdir()
+            (logs / "server.log").write_text("startup ended\n")
+            summary = summarize.build_summary(run_dir, {"events": {"loads": [], "queries": [], "servers": [{"attempt": 1, "log": "logs/server.log", "status": "unexpected_exit", "unexpected_exit": True}]}})
+        self.assertEqual(summary["failures"][0]["stage"], "server")
+
     def test_structured_results_do_not_require_logs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             run_dir = Path(temp)
@@ -272,6 +295,14 @@ class QuerySetIdentityTests(unittest.TestCase):
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_port_probe_enables_address_reuse_and_retries(self) -> None:
+        sock = mock.MagicMock(); sock.__enter__.return_value = sock
+        with mock.patch.object(benchmark.socket, "socket", return_value=sock):
+            self.assertTrue(benchmark.port_available(8181))
+        sock.setsockopt.assert_called_once_with(benchmark.socket.SOL_SOCKET, benchmark.socket.SO_REUSEADDR, 1)
+        with mock.patch.object(benchmark, "port_available", side_effect=[False, True]), mock.patch.object(benchmark.time, "sleep"):
+            benchmark.check_port_available(8181)
+
     def test_new_run_layout_has_no_local_artifacts_or_managed_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

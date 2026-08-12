@@ -170,7 +170,7 @@ def prepare_run(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         manifest = {
             "schema_version": SCHEMA_VERSION, "kind": "influxdb3-run", "run_id": run_dir.name,
             "created_at": utc_now(), "profile": profile, "database": getattr(args, "database", DEFAULT_DATABASE),
-            "workload": build_workload(args), "events": {"loads": [], "queries": []},
+            "workload": build_workload(args), "events": {"loads": [], "queries": [], "servers": []},
         }
     if hasattr(args, "database") and manifest.get("database") != args.database and manifest_path.exists():
         raise BenchmarkError("--database conflicts with the database pinned by this run")
@@ -582,14 +582,25 @@ def probe_servers(urls: Sequence[str], token: str = "") -> dict[str, Any]:
     }
 
 
-def check_port_available(port: int) -> None:
+def port_available(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        try: sock.bind(("127.0.0.1", port))
-        except OSError as exc: raise BenchmarkError(f"managed InfluxDB 3 HTTP port {port} is unavailable") from exc
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port)); return True
+        except OSError:
+            return False
+
+
+def check_port_available(port: int, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not port_available(port):
+        if time.monotonic() >= deadline:
+            raise BenchmarkError(f"managed InfluxDB 3 HTTP port {port} is unavailable")
+        time.sleep(0.1)
 
 
 @contextlib.contextmanager
-def connection(args: argparse.Namespace, run_dir: Path) -> Iterator[tuple[str, bool, dict[str, Any] | None, Path | None]]:
+def connection(args: argparse.Namespace, run_dir: Path, manifest: dict[str, Any]) -> Iterator[tuple[str, bool, dict[str, Any] | None, Path | None]]:
     if bool(args.instance_id) == bool(args.url): raise BenchmarkError("provide exactly one of --instance-id or --url")
     if args.url:
         token = os.environ.get(args.auth_token_env, "")
@@ -600,26 +611,63 @@ def connection(args: argparse.Namespace, run_dir: Path) -> Iterator[tuple[str, b
     with lock_database(workspace):
         binary = Path(database_manifest["installation_path"]) / "influxdb3"
         if not binary.is_file() or not os.access(binary, os.X_OK): raise BenchmarkError(f"InfluxDB 3 binary is not executable: {binary}")
-        check_port_available(args.http_port); endpoint = f"http://127.0.0.1:{args.http_port}"; process_log_path = run_dir / "logs" / "influxdb3-process.log"; process_log = process_log_path.open("a", encoding="utf-8")
+        endpoint = f"http://127.0.0.1:{args.http_port}"
+        servers = manifest.setdefault("events", {}).setdefault("servers", [])
+        attempt = next_attempt(servers)
+        process_log_path = run_dir / "logs" / f"influxdb3-process-run-{attempt:03d}.log"
+        event = {"attempt": attempt, "log": relative(run_dir, process_log_path), "endpoint": endpoint, "status": "starting", "started_at": utc_now(), "ready_at": None, "shutdown_expected": False, "forced_shutdown": False, "unexpected_exit": False}
+        servers.append(event); save_manifest(run_dir, manifest)
+        process_log = process_log_path.open("w", encoding="utf-8")
+        try:
+            check_port_available(args.http_port)
+        except Exception:
+            process_log.write(f"managed InfluxDB 3 HTTP port {args.http_port} is unavailable\n"); process_log.close()
+            event.update(status="startup_failed", finished_at=utc_now()); save_manifest(run_dir, manifest); raise
         command = [str(binary), "serve", "--object-store=file", f"--data-dir={workspace / 'data'}", f"--node-id={database_manifest['node_id']}", f"--http-bind=127.0.0.1:{args.http_port}", "--without-auth"]
         if database_manifest["edition"] == "enterprise":
             command.append(f"--cluster-id={database_manifest['cluster_id']}")
             license_path = database_manifest.get("license", {}).get("path")
             if license_path: command.append(f"--license-file={license_path}")
-        process_log.write(f"$ {display_command(command)}\n"); process_log.flush(); process = subprocess.Popen(command, cwd=workspace, stdout=process_log, stderr=subprocess.STDOUT, start_new_session=True)
+        process_log.write(f"$ {display_command(command)}\n"); process_log.flush()
+        try:
+            process = subprocess.Popen(command, cwd=workspace, stdout=process_log, stderr=subprocess.STDOUT, start_new_session=True)
+        except Exception:
+            event.update(status="startup_failed", finished_at=utc_now()); save_manifest(run_dir, manifest); process_log.close(); raise
+        event["pid"] = process.pid; save_manifest(run_dir, manifest)
+        ready = False
         try:
             deadline = time.monotonic() + args.startup_timeout
             while time.monotonic() < deadline:
-                if process.poll() is not None: raise BenchmarkError(f"InfluxDB 3 exited during startup; see {process_log_path}")
-                if endpoint_ready(endpoint): break
+                if process.poll() is not None:
+                    event.update(status="startup_failed", unexpected_exit=True, exit_code=process.returncode, finished_at=utc_now()); save_manifest(run_dir, manifest)
+                    raise BenchmarkError(f"InfluxDB 3 exited during startup; see {process_log_path}")
+                if endpoint_ready(endpoint):
+                    ready = True; event.update(status="ready", ready_at=utc_now()); save_manifest(run_dir, manifest); break
                 time.sleep(0.5)
-            else: raise BenchmarkError(f"InfluxDB 3 was not ready within {args.startup_timeout}s; see {process_log_path}")
+            else:
+                event.update(status="startup_timeout", finished_at=utc_now()); save_manifest(run_dir, manifest)
+                raise BenchmarkError(f"InfluxDB 3 was not ready within {args.startup_timeout}s; see {process_log_path}")
             yield endpoint, True, database_manifest, workspace
         finally:
-            if process.poll() is None:
+            return_code = process.poll()
+            if ready and return_code is not None:
+                event.update(status="unexpected_exit", unexpected_exit=True, exit_code=return_code, finished_at=utc_now())
+            if return_code is None:
+                event.update(shutdown_expected=True, shutdown_started_at=utc_now()); save_manifest(run_dir, manifest)
                 os.killpg(process.pid, signal.SIGTERM)
-                try: process.wait(timeout=15)
-                except subprocess.TimeoutExpired: os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=5)
+                try:
+                    return_code = process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    event["forced_shutdown"] = True
+                    os.killpg(process.pid, signal.SIGKILL); return_code = process.wait(timeout=5)
+                if event["forced_shutdown"]:
+                    event["status"] = "forced_shutdown"
+                elif event["status"] not in ("startup_failed", "startup_timeout"):
+                    event["status"] = "stopped"
+                event.update(exit_code=return_code, finished_at=utc_now())
+            elif event.get("finished_at") is None:
+                event["finished_at"] = utc_now()
+            save_manifest(run_dir, manifest)
             process_log.close()
 
 
@@ -682,7 +730,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.only in ("all", "data"): generate_data(args, run_dir, manifest)
             if args.only in ("all", "queries"): generate_queries(args, run_dir, manifest)
         elif args.command in ("load", "query", "all"):
-            with connection(args, run_dir) as (endpoint, managed, database_manifest, database_path):
+            with connection(args, run_dir, manifest) as (endpoint, managed, database_manifest, database_path):
                 edition = database_manifest["edition"] if managed else args.edition
                 previous = manifest.get("target") or {}
                 server = {"version": database_manifest.get("version"), "revision": None, "build": None} if managed else probe_servers(args.url, os.environ.get(args.auth_token_env, ""))

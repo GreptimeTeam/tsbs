@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import getpass
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -36,6 +38,7 @@ SCHEMA_VERSION = 1
 INSTALLATION_SCHEMA_VERSION = 2
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
+EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![\w.-])")
 
 
 class SetupError(RuntimeError):
@@ -395,17 +398,59 @@ def wait_health(url: str, process: subprocess.Popen[Any], timeout: int) -> bool:
 
 def port_available(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(("127.0.0.1", port)); return True
         except OSError:
             return False
 
 
+def wait_port_available(port: int, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not port_available(port):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+    return True
+
+
+def redact_emails(text: str, secrets: Sequence[str] = ()) -> str:
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "<redacted-email>")
+    return EMAIL_RE.sub("<redacted-email>", text)
+
+
+def read_license_email(args: argparse.Namespace) -> str:
+    if args.license_email_stdin:
+        value = getpass.getpass("InfluxDB 3 license email: ") if sys.stdin.isatty() else sys.stdin.readline().rstrip("\r\n")
+    else:
+        value = os.environ.get(args.license_email_env, "")
+    if not value:
+        source = "standard input" if args.license_email_stdin else f"${args.license_email_env}"
+        raise SetupError(f"trial/home activation requires an email from {source}")
+    return value
+
+
+def stream_redacted_output(stream: Any, log: Any, secrets: Sequence[str]) -> None:
+    try:
+        for line in stream:
+            log.write(redact_emails(line, secrets)); log.flush()
+    finally:
+        stream.close()
+
+
+def scrub_log(path: Path, secrets: Sequence[str]) -> None:
+    if path.exists():
+        text = path.read_text(encoding="utf-8", errors="replace")
+        path.write_text(redact_emails(text, secrets), encoding="utf-8")
+
+
 def activate(args: argparse.Namespace) -> dict[str, Any]:
     path = instance_path(args); manifest = validate_instance(path, args.instance_id)
     if manifest["edition"] != "enterprise":
         raise SetupError("license activation is only valid for Enterprise instances")
-    if not port_available(args.http_port):
+    if not wait_port_available(args.http_port):
         raise SetupError(f"HTTP port {args.http_port} is unavailable")
     installation = Path(manifest["installation_path"]); binary = installation / "influxdb3"
     command = [str(binary), "serve", "--object-store=file", f"--data-dir={path / 'data'}", f"--node-id={manifest['node_id']}", f"--cluster-id={manifest['cluster_id']}", f"--http-bind=127.0.0.1:{args.http_port}", "--without-auth"]
@@ -416,27 +461,31 @@ def activate(args: argparse.Namespace) -> dict[str, Any]:
             raise SetupError(f"license file does not exist: {license_file}")
         command.append(f"--license-file={license_file}"); source = "file"
     else:
-        license_email = os.environ[args.license_email_env]
+        license_email = read_license_email(args)
         env["INFLUXDB3_LICENSE_EMAIL"] = license_email
         env["INFLUXDB3_LICENSE_TYPE"] = args.license_type
         source = args.license_type
     log_path = path / "logs" / "license-activation.log"
-    with log_path.open("a", encoding="utf-8") as log:
-        log.write(f"\nActivation attempt at {utc_now()} (source={source})\n"); log.flush()
-        process = subprocess.Popen(command, cwd=path, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        ready = False
-        try:
-            ready = wait_health(f"http://127.0.0.1:{args.http_port}", process, args.activation_timeout)
-        finally:
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGTERM)
-                try: process.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=5)
-    if args.license_type:
-        text = log_path.read_text(encoding="utf-8", errors="replace")
-        if license_email in text:
-            log_path.write_text(text.replace(license_email, "<redacted-email>"), encoding="utf-8")
+    secrets = (license_email,) if args.license_type else ()
+    try:
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(f"\nActivation attempt at {utc_now()} (source={source})\n"); log.flush()
+            process = subprocess.Popen(command, cwd=path, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
+            assert process.stdout is not None
+            reader = threading.Thread(target=stream_redacted_output, args=(process.stdout, log, secrets), daemon=True)
+            reader.start()
+            ready = False
+            try:
+                ready = wait_health(f"http://127.0.0.1:{args.http_port}", process, args.activation_timeout)
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    try: process.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=5)
+                reader.join(timeout=5)
+    finally:
+        scrub_log(log_path, secrets)
     manifest["license"] = {
         "status": "active" if ready else "pending", "source": source,
         "path": str(license_file) if args.license_file else None,
@@ -455,7 +504,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__); sub = parser.add_subparsers(dest="command", required=True)
     install_parser = sub.add_parser("install"); install_parser.add_argument("--edition", choices=("core", "enterprise"), required=True); install_parser.add_argument("--version"); install_parser.add_argument("--install-root", type=Path); install_parser.add_argument("--reinstall", action="store_true")
     prepare_parser = sub.add_parser("prepare"); prepare_parser.add_argument("--instance-id", required=True); prepare_parser.add_argument("--edition", choices=("core", "enterprise"), required=True); prepare_parser.add_argument("--version"); prepare_parser.add_argument("--install-root", type=Path); prepare_parser.add_argument("--instance-root", type=Path)
-    activate_parser = sub.add_parser("activate"); activate_parser.add_argument("--instance-id", required=True); activate_parser.add_argument("--instance-root", type=Path); license_group = activate_parser.add_mutually_exclusive_group(required=True); license_group.add_argument("--license-file", type=Path); license_group.add_argument("--license-type", choices=("trial", "home")); activate_parser.add_argument("--license-email-env", default="INFLUXDB3_LICENSE_EMAIL"); activate_parser.add_argument("--http-port", type=int, default=8181); activate_parser.add_argument("--activation-timeout", type=int, default=600)
+    activate_parser = sub.add_parser("activate"); activate_parser.add_argument("--instance-id", required=True); activate_parser.add_argument("--instance-root", type=Path); license_group = activate_parser.add_mutually_exclusive_group(required=True); license_group.add_argument("--license-file", type=Path); license_group.add_argument("--license-type", choices=("trial", "home")); activate_parser.add_argument("--license-email-env", default="INFLUXDB3_LICENSE_EMAIL"); activate_parser.add_argument("--license-email-stdin", action="store_true", help="read the activation email securely from one line of standard input"); activate_parser.add_argument("--http-port", type=int, default=8181); activate_parser.add_argument("--activation-timeout", type=int, default=600)
     list_parser = sub.add_parser("list"); list_parser.add_argument("--instance-root", type=Path)
     inspect_parser = sub.add_parser("inspect"); inspect_parser.add_argument("--instance-id", required=True); inspect_parser.add_argument("--instance-root", type=Path)
     verify_parser = sub.add_parser("verify"); verify_parser.add_argument("--instance-id", required=True); verify_parser.add_argument("--instance-root", type=Path)
@@ -468,7 +517,9 @@ def validate_args(args: argparse.Namespace) -> None:
     if hasattr(args, "instance_id") and not ID_RE.fullmatch(args.instance_id):
         raise SetupError("--instance-id contains invalid characters")
     if args.command == "activate":
-        if args.license_type and not os.environ.get(args.license_email_env):
+        if args.license_email_stdin and not args.license_type:
+            raise SetupError("--license-email-stdin requires --license-type")
+        if args.license_type and not args.license_email_stdin and not os.environ.get(args.license_email_env):
             raise SetupError(f"trial/home activation requires email in ${args.license_email_env}")
         if args.activation_timeout <= 0 or not 1 <= args.http_port <= 65535:
             raise SetupError("activation timeout and HTTP port must be positive and valid")

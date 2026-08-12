@@ -198,15 +198,42 @@ class InstanceTests(unittest.TestCase):
             args = argparse.Namespace(
                 instance_id="enterprise-a", instance_root=root / "instances",
                 license_file=None, license_type="trial", license_email_env="PRIVATE_LICENSE_EMAIL",
+                license_email_stdin=False,
                 http_port=8181, activation_timeout=5,
             )
             process = mock.Mock(); process.poll.return_value = None; process.pid = 123
+            process.stdout = io.StringIO("activation for private@example.com\n")
             process.wait.return_value = 0
             with mock.patch.dict("os.environ", {"PRIVATE_LICENSE_EMAIL": "private@example.com"}), mock.patch.object(setup, "verify_binary"), mock.patch.object(setup, "port_available", return_value=True), mock.patch.object(setup.subprocess, "Popen", return_value=process), mock.patch.object(setup, "wait_health", return_value=True), mock.patch.object(setup.os, "killpg"):
                 value = setup.activate(args)
             persisted = json.dumps(value)
             self.assertNotIn("private@example.com", persisted)
+            activation_log = root / "instances/enterprise-a/logs/license-activation.log"
+            self.assertNotIn("private@example.com", activation_log.read_text())
+            self.assertIn("<redacted-email>", activation_log.read_text())
             self.assertEqual(value["license"], {"status": "active", "source": "trial", "path": None})
+
+    def test_stdin_email_takes_precedence_and_generic_emails_are_redacted(self) -> None:
+        args = setup.make_parser().parse_args([
+            "activate", "--instance-id", "enterprise-a", "--license-type", "home",
+            "--license-email-stdin",
+        ])
+        stdin = mock.Mock(); stdin.isatty.return_value = False; stdin.readline.return_value = "stdin@example.com\n"
+        with mock.patch.object(setup.sys, "stdin", stdin), mock.patch.dict("os.environ", {"INFLUXDB3_LICENSE_EMAIL": "env@example.com"}):
+            self.assertEqual(setup.read_license_email(args), "stdin@example.com")
+        self.assertEqual(
+            setup.redact_emails("known stdin@example.com unknown other@example.org", ("stdin@example.com",)),
+            "known <redacted-email> unknown <redacted-email>",
+        )
+
+    def test_port_probe_enables_address_reuse_and_retries(self) -> None:
+        sock = mock.MagicMock()
+        sock.__enter__.return_value = sock
+        with mock.patch.object(setup.socket, "socket", return_value=sock):
+            self.assertTrue(setup.port_available(8181))
+        sock.setsockopt.assert_called_once_with(setup.socket.SOL_SOCKET, setup.socket.SO_REUSEADDR, 1)
+        with mock.patch.object(setup, "port_available", side_effect=[False, True]), mock.patch.object(setup.time, "sleep"):
+            self.assertTrue(setup.wait_port_available(8181))
 
 
 class ArgumentTests(unittest.TestCase):
@@ -219,6 +246,9 @@ class ArgumentTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {}, clear=True):
             with self.assertRaisesRegex(setup.SetupError, "INFLUXDB3_LICENSE_EMAIL"):
                 setup.validate_args(args)
+        stdin_args = setup.make_parser().parse_args(["activate", "--instance-id", "ent", "--license-type", "home", "--license-email-stdin"])
+        with mock.patch.dict("os.environ", {}, clear=True):
+            setup.validate_args(stdin_args)
 
 
 if __name__ == "__main__":
