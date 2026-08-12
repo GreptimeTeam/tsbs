@@ -1,0 +1,4 @@
+interface:
+  display_name: "Benchmark InfluxDB 3"
+  short_description: "Run reusable InfluxDB 3 TSBS benchmarks"
+  default_prompt: "Use $benchmark-influxdb3 to run a repeatable TSBS benchmark against InfluxDB 3 Core or Enterprise."
