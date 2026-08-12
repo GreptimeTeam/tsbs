@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install and prepare reusable local InfluxDB 3 instances."""
+"""Install and prepare reusable local InfluxDB 3 database workspaces."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ SCRIPT_PATH = Path(__file__).resolve()
 REPO_ROOT = SCRIPT_PATH.parents[4]
 DEFAULT_ROOT = REPO_ROOT / ".benchmarks" / "influxdb3"
 DEFAULT_INSTALL_ROOT = DEFAULT_ROOT / "installations"
-DEFAULT_INSTANCE_ROOT = DEFAULT_ROOT / "instances"
+DEFAULT_DATABASE_ROOT = DEFAULT_ROOT / "databases"
 BASE_URL = "https://dl.influxdata.com/influxdb/releases"
 OFFICIAL_INSTALLER_URL = "https://www.influxdata.com/d/install_influxdb3.sh"
 USER_AGENT = "tsbs-influxdb3-setup/1.0"
@@ -336,41 +336,41 @@ def install(args: argparse.Namespace) -> dict[str, Any]:
             shutil.rmtree(temporary)
 
 
-def instance_path(args: argparse.Namespace) -> Path:
-    return (args.instance_root or DEFAULT_INSTANCE_ROOT).expanduser().resolve() / args.instance_id
+def database_path(args: argparse.Namespace) -> Path:
+    return (args.database_root or DEFAULT_DATABASE_ROOT).expanduser().resolve() / args.database_id
 
 
-def validate_instance(path: Path, expected_id: str | None = None) -> dict[str, Any]:
+def validate_database(path: Path, expected_id: str | None = None) -> dict[str, Any]:
     manifest = read_json(path / "manifest.json")
-    required = {"schema_version", "kind", "instance_id", "edition", "version", "installation_path", "binary_sha256", "node_id", "cluster_id", "license", "database", "binding"}
-    if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("kind") != "influxdb3-instance" or not required.issubset(manifest):
-        raise SetupError(f"malformed instance manifest: {path / 'manifest.json'}")
-    if expected_id and manifest["instance_id"] != expected_id:
-        raise SetupError("instance identity mismatch")
+    required = {"schema_version", "kind", "database_id", "edition", "version", "installation_path", "binary_sha256", "node_id", "cluster_id", "license", "database", "binding"}
+    if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("kind") != "influxdb3-database" or not required.issubset(manifest):
+        raise SetupError(f"malformed database manifest: {path / 'manifest.json'}")
+    if expected_id and manifest["database_id"] != expected_id:
+        raise SetupError("database identity mismatch")
     installation = Path(manifest["installation_path"])
     installed = validate_installation(installation, manifest["edition"], manifest["version"])
     if installed["binary_sha256"] != manifest["binary_sha256"]:
-        raise SetupError("instance installation checksum mismatch")
+        raise SetupError("database installation checksum mismatch")
     return manifest
 
 
 def prepare(args: argparse.Namespace) -> dict[str, Any]:
     installation = installation_path(args)
     installed = validate_installation(installation, args.edition, args.version)
-    path = instance_path(args)
+    path = database_path(args)
     if (path / "manifest.json").exists():
-        manifest = validate_instance(path, args.instance_id)
+        manifest = validate_database(path, args.database_id)
         identity = (manifest["edition"], manifest["version"], manifest["binary_sha256"])
         expected = (args.edition, args.version, installed["binary_sha256"])
         if identity != expected:
-            raise SetupError("instance is already bound to another edition, version, or binary")
-        return {**manifest, "instance_path": str(path), "reused": True}
+            raise SetupError("database is already bound to another edition, version, or binary")
+        return {**manifest, "database_path": str(path), "reused": True}
     path.mkdir(parents=True, exist_ok=True)
     (path / "data").mkdir(); (path / "logs").mkdir()
-    stem = re.sub(r"[^A-Za-z0-9-]", "-", args.instance_id)
+    stem = re.sub(r"[^A-Za-z0-9-]", "-", args.database_id)
     manifest = {
-        "schema_version": SCHEMA_VERSION, "kind": "influxdb3-instance",
-        "instance_id": args.instance_id, "edition": args.edition, "version": args.version,
+        "schema_version": SCHEMA_VERSION, "kind": "influxdb3-database",
+        "database_id": args.database_id, "edition": args.edition, "version": args.version,
         "version_source": args.version_source,
         "installation_path": str(installation), "binary_sha256": installed["binary_sha256"],
         "node_id": f"{stem}-node", "cluster_id": f"{stem}-cluster" if args.edition == "enterprise" else None,
@@ -378,7 +378,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         "database": None, "binding": None,
     }
     save_json(path / "manifest.json", manifest)
-    return {**manifest, "instance_path": str(path), "reused": False}
+    return {**manifest, "database_path": str(path), "reused": False}
 
 
 def wait_health(url: str, process: subprocess.Popen[Any], timeout: int) -> bool:
@@ -447,9 +447,9 @@ def scrub_log(path: Path, secrets: Sequence[str]) -> None:
 
 
 def activate(args: argparse.Namespace) -> dict[str, Any]:
-    path = instance_path(args); manifest = validate_instance(path, args.instance_id)
+    path = database_path(args); manifest = validate_database(path, args.database_id)
     if manifest["edition"] != "enterprise":
-        raise SetupError("license activation is only valid for Enterprise instances")
+        raise SetupError("license activation is only valid for Enterprise databases")
     if not wait_port_available(args.http_port):
         raise SetupError(f"HTTP port {args.http_port} is unavailable")
     installation = Path(manifest["installation_path"]); binary = installation / "influxdb3"
@@ -493,7 +493,7 @@ def activate(args: argparse.Namespace) -> dict[str, Any]:
     manifest["updated_at"] = utc_now(); save_json(path / "manifest.json", manifest)
     if not ready:
         raise SetupError(f"Enterprise was not ready within {args.activation_timeout}s; verify the email if required and see {log_path}")
-    return {**manifest, "instance_path": str(path)}
+    return {**manifest, "database_path": str(path)}
 
 
 def print_value(value: Any) -> None:
@@ -503,19 +503,19 @@ def print_value(value: Any) -> None:
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__); sub = parser.add_subparsers(dest="command", required=True)
     install_parser = sub.add_parser("install"); install_parser.add_argument("--edition", choices=("core", "enterprise"), required=True); install_parser.add_argument("--version"); install_parser.add_argument("--install-root", type=Path); install_parser.add_argument("--reinstall", action="store_true")
-    prepare_parser = sub.add_parser("prepare"); prepare_parser.add_argument("--instance-id", required=True); prepare_parser.add_argument("--edition", choices=("core", "enterprise"), required=True); prepare_parser.add_argument("--version"); prepare_parser.add_argument("--install-root", type=Path); prepare_parser.add_argument("--instance-root", type=Path)
-    activate_parser = sub.add_parser("activate"); activate_parser.add_argument("--instance-id", required=True); activate_parser.add_argument("--instance-root", type=Path); license_group = activate_parser.add_mutually_exclusive_group(required=True); license_group.add_argument("--license-file", type=Path); license_group.add_argument("--license-type", choices=("trial", "home")); activate_parser.add_argument("--license-email-env", default="INFLUXDB3_LICENSE_EMAIL"); activate_parser.add_argument("--license-email-stdin", action="store_true", help="read the activation email securely from one line of standard input"); activate_parser.add_argument("--http-port", type=int, default=8181); activate_parser.add_argument("--activation-timeout", type=int, default=600)
-    list_parser = sub.add_parser("list"); list_parser.add_argument("--instance-root", type=Path)
-    inspect_parser = sub.add_parser("inspect"); inspect_parser.add_argument("--instance-id", required=True); inspect_parser.add_argument("--instance-root", type=Path)
-    verify_parser = sub.add_parser("verify"); verify_parser.add_argument("--instance-id", required=True); verify_parser.add_argument("--instance-root", type=Path)
+    prepare_parser = sub.add_parser("prepare"); prepare_parser.add_argument("--database-id", required=True); prepare_parser.add_argument("--edition", choices=("core", "enterprise"), required=True); prepare_parser.add_argument("--version"); prepare_parser.add_argument("--install-root", type=Path); prepare_parser.add_argument("--database-root", type=Path)
+    activate_parser = sub.add_parser("activate"); activate_parser.add_argument("--database-id", required=True); activate_parser.add_argument("--database-root", type=Path); license_group = activate_parser.add_mutually_exclusive_group(required=True); license_group.add_argument("--license-file", type=Path); license_group.add_argument("--license-type", choices=("trial", "home")); activate_parser.add_argument("--license-email-env", default="INFLUXDB3_LICENSE_EMAIL"); activate_parser.add_argument("--license-email-stdin", action="store_true", help="read the activation email securely from one line of standard input"); activate_parser.add_argument("--http-port", type=int, default=8181); activate_parser.add_argument("--activation-timeout", type=int, default=600)
+    list_parser = sub.add_parser("list"); list_parser.add_argument("--database-root", type=Path)
+    inspect_parser = sub.add_parser("inspect"); inspect_parser.add_argument("--database-id", required=True); inspect_parser.add_argument("--database-root", type=Path)
+    verify_parser = sub.add_parser("verify"); verify_parser.add_argument("--database-id", required=True); verify_parser.add_argument("--database-root", type=Path)
     return parser
 
 
 def validate_args(args: argparse.Namespace) -> None:
     if hasattr(args, "version") and args.version is not None and not VERSION_RE.fullmatch(args.version):
         raise SetupError("--version must be omitted or be an exact semantic version such as 3.11.1")
-    if hasattr(args, "instance_id") and not ID_RE.fullmatch(args.instance_id):
-        raise SetupError("--instance-id contains invalid characters")
+    if hasattr(args, "database_id") and not ID_RE.fullmatch(args.database_id):
+        raise SetupError("--database-id contains invalid characters")
     if args.command == "activate":
         if args.license_email_stdin and not args.license_type:
             raise SetupError("--license-email-stdin requires --license-type")
@@ -535,13 +535,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "prepare": value = prepare(args)
         elif args.command == "activate": value = activate(args)
         elif args.command in ("inspect", "verify"):
-            path = instance_path(args); value = {**validate_instance(path, args.instance_id), "instance_path": str(path)}
+            path = database_path(args); value = {**validate_database(path, args.database_id), "database_path": str(path)}
         else:
-            root = (args.instance_root or DEFAULT_INSTANCE_ROOT).expanduser().resolve(); value = []
+            root = (args.database_root or DEFAULT_DATABASE_ROOT).expanduser().resolve(); value = []
             if root.exists():
                 for path in sorted(root.iterdir()):
                     if path.is_dir():
-                        try: value.append({**validate_instance(path), "instance_path": str(path)})
+                        try: value.append({**validate_database(path), "database_path": str(path)})
                         except SetupError: continue
         print_value(value); return 0
     except (SetupError, OSError, tarfile.TarError, KeyError, TypeError) as exc:

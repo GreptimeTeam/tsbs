@@ -261,13 +261,13 @@ class SummaryTests(unittest.TestCase):
                 Path(temp),
                 {
                     "run_id": "run", "profile": "smoke", "database": "benchmark",
-                    "target": {"mode": "managed", "instance_id": "db-a", "edition": "core", "urls": ["http://localhost:8181"]},
+                    "target": {"mode": "managed", "database_id": "db-a", "edition": "core", "urls": ["http://localhost:8181"]},
                     "dataset": {"dataset_id": "data-a"},
                     "query_set": {"query_set_id": "set-a", "manifest_sha256": "abc"},
                     "events": {"loads": [], "queries": []},
                 },
             )
-        self.assertEqual(summary["target"]["instance_id"], "db-a")
+        self.assertEqual(summary["target"]["database_id"], "db-a")
         self.assertEqual(summary["query_set"]["query_set_id"], "set-a")
         rendered = summarize.render_markdown(summary)
         self.assertIn("managed:db-a", rendered)
@@ -417,19 +417,19 @@ class QuerySetTests(unittest.TestCase):
 
 class ManagedDatabaseTests(unittest.TestCase):
     def args(self, root: Path, mode: str | None = None) -> argparse.Namespace:
-        values = ["load", "--instance-id", "db-a", "--instance-root", str(root), "--database", "benchmark"]
+        values = ["load", "--database-id", "db-a", "--database-root", str(root), "--database", "benchmark"]
         if mode: values.extend(["--database-mode", mode])
         if mode == "reset": values.extend(["--confirm-reset", "benchmark"])
         return benchmark.make_parser().parse_args(values)
 
-    def prepare_instance(self, root: Path) -> Path:
+    def prepare_database(self, root: Path) -> Path:
         installation = root / "installation"; installation.mkdir(parents=True)
         binary = installation / "influxdb3"
         binary.write_text("#!/bin/sh\necho 'influxdb3 InfluxDB 3 Core, 3.11.1, revision test'\n", encoding="utf-8")
         binary.chmod(0o755)
         path = root / "db-a"; path.mkdir(); (path / "data").mkdir(); (path / "logs").mkdir()
         benchmark.save_json(path / "manifest.json", {
-            "schema_version": 1, "kind": "influxdb3-instance", "instance_id": "db-a",
+            "schema_version": 1, "kind": "influxdb3-database", "database_id": "db-a",
             "edition": "core", "version": "3.11.1", "installation_path": str(installation),
             "binary_sha256": benchmark.sha256_file(binary), "node_id": "db-a-node",
             "cluster_id": None, "license": {"status": "not-required", "source": None},
@@ -439,7 +439,7 @@ class ManagedDatabaseTests(unittest.TestCase):
 
     def test_workspace_bind_reuse_reset_and_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp); self.prepare_instance(root); args = self.args(root); path, db = benchmark.prepare_database_workspace(args)
+            root = Path(temp); self.prepare_database(root); args = self.args(root); path, db = benchmark.prepare_database_workspace(args)
             self.assertEqual({p.name for p in path.iterdir()}, {"manifest.json", "data", "logs"})
             with benchmark.lock_database(path):
                 with self.assertRaisesRegex(benchmark.BenchmarkError, "locked"):
@@ -472,7 +472,7 @@ class ManagedDatabaseTests(unittest.TestCase):
 
     def test_failed_preflight_does_not_bind_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp); path = self.prepare_instance(root); args = self.args(root)
+            root = Path(temp); path = self.prepare_database(root); args = self.args(root)
             with mock.patch.object(
                 benchmark.subprocess,
                 "run",

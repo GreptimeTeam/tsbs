@@ -289,7 +289,7 @@ def render_markdown(summary: dict[str, Any]) -> str:
     ]
     target = summary.get("target")
     if target:
-        target_name = target.get("instance_id") or ",".join(target.get("urls", []))
+        target_name = target.get("database_id") or ",".join(target.get("urls", []))
         lines.append(f"- Benchmark target: `{target.get('mode')}:{target_name}`")
         lines.append(f"- Edition: `{target.get('edition')}`")
         if target.get("version"):

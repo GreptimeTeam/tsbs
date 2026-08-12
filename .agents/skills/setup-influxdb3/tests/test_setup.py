@@ -148,13 +148,13 @@ class VersionResolutionTests(unittest.TestCase):
         resolver.assert_not_called()
         self.assertEqual((explicit.version, explicit.version_source), ("3.10.5", "explicit"))
 
-        latest = setup.make_parser().parse_args(["prepare", "--edition", "core", "--instance-id", "core-a"])
+        latest = setup.make_parser().parse_args(["prepare", "--edition", "core", "--database-id", "core-a"])
         with mock.patch.object(setup, "resolve_official_version", return_value="3.11.1"):
             setup.resolve_args_version(latest)
         self.assertEqual((latest.version, latest.version_source), ("3.11.1", "official-installer"))
 
 
-class InstanceTests(unittest.TestCase):
+class DatabaseTests(unittest.TestCase):
     def make_installation(self, root: Path, edition: str = "core") -> Path:
         path = root / "installations" / edition / "3.11.1" / "linux_amd64"
         path.mkdir(parents=True); binary = path / "influxdb3"
@@ -170,9 +170,9 @@ class InstanceTests(unittest.TestCase):
 
     def args(self, root: Path, edition: str = "core") -> argparse.Namespace:
         return argparse.Namespace(
-            instance_id=f"{edition}-a", edition=edition, version="3.11.1",
+            database_id=f"{edition}-a", edition=edition, version="3.11.1",
             version_source="explicit",
-            install_root=root / "installations", instance_root=root / "instances",
+            install_root=root / "installations", database_root=root / "databases",
         )
 
     def test_prepare_core_and_enterprise_identities(self) -> None:
@@ -196,7 +196,7 @@ class InstanceTests(unittest.TestCase):
             with mock.patch.object(setup, "platform_tag", return_value="linux_amd64"):
                 setup.prepare(prepare_args)
             args = argparse.Namespace(
-                instance_id="enterprise-a", instance_root=root / "instances",
+                database_id="enterprise-a", database_root=root / "databases",
                 license_file=None, license_type="trial", license_email_env="PRIVATE_LICENSE_EMAIL",
                 license_email_stdin=False,
                 http_port=8181, activation_timeout=5,
@@ -208,14 +208,14 @@ class InstanceTests(unittest.TestCase):
                 value = setup.activate(args)
             persisted = json.dumps(value)
             self.assertNotIn("private@example.com", persisted)
-            activation_log = root / "instances/enterprise-a/logs/license-activation.log"
+            activation_log = root / "databases/enterprise-a/logs/license-activation.log"
             self.assertNotIn("private@example.com", activation_log.read_text())
             self.assertIn("<redacted-email>", activation_log.read_text())
             self.assertEqual(value["license"], {"status": "active", "source": "trial", "path": None})
 
     def test_stdin_email_takes_precedence_and_generic_emails_are_redacted(self) -> None:
         args = setup.make_parser().parse_args([
-            "activate", "--instance-id", "enterprise-a", "--license-type", "home",
+            "activate", "--database-id", "enterprise-a", "--license-type", "home",
             "--license-email-stdin",
         ])
         stdin = mock.Mock(); stdin.isatty.return_value = False; stdin.readline.return_value = "stdin@example.com\n"
@@ -242,11 +242,11 @@ class ArgumentTests(unittest.TestCase):
         with self.assertRaisesRegex(setup.SetupError, "omitted or be an exact semantic version"):
             setup.validate_args(args)
         setup.validate_args(setup.make_parser().parse_args(["install", "--edition", "core"]))
-        args = setup.make_parser().parse_args(["activate", "--instance-id", "ent", "--license-type", "home"])
+        args = setup.make_parser().parse_args(["activate", "--database-id", "ent", "--license-type", "home"])
         with mock.patch.dict("os.environ", {}, clear=True):
             with self.assertRaisesRegex(setup.SetupError, "INFLUXDB3_LICENSE_EMAIL"):
                 setup.validate_args(args)
-        stdin_args = setup.make_parser().parse_args(["activate", "--instance-id", "ent", "--license-type", "home", "--license-email-stdin"])
+        stdin_args = setup.make_parser().parse_args(["activate", "--database-id", "ent", "--license-type", "home", "--license-email-stdin"])
         with mock.patch.dict("os.environ", {}, clear=True):
             setup.validate_args(stdin_args)
 

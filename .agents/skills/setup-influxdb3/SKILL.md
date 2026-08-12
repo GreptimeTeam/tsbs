@@ -1,13 +1,13 @@
 ---
 name: setup-influxdb3
-description: Install checksum-verified latest or version-pinned InfluxDB 3 Core or Enterprise native distributions and prepare reusable local benchmark instances. Use for local InfluxDB 3 installation, instance setup, Enterprise trial/home activation, license-file setup, installation verification, or locating a managed binary for TSBS.
+description: Install checksum-verified latest or version-pinned InfluxDB 3 Core or Enterprise native distributions and prepare reusable local benchmark database workspaces. Use for local InfluxDB 3 installation, database setup, Enterprise trial/home activation, license-file setup, installation verification, or locating a managed binary for TSBS.
 ---
 
 # Setup InfluxDB 3
 
-Use `scripts/setup.py` for deterministic installation and instance management.
+Use `scripts/setup.py` for deterministic installation and database management.
 Read `references/setup.md` before choosing an edition, version, platform, or
-Enterprise license flow. Use `$benchmark-influxdb3` after preparing an instance.
+Enterprise license flow. Use `$benchmark-influxdb3` after preparing a database workspace.
 
 ## Install the official latest or an exact version
 
@@ -27,20 +27,20 @@ version for deterministic setup; the literal value `latest` is invalid. The
 installer verifies the vendor SHA-256 and complete extracted distribution,
 checks `influxdb3 --version`, and publishes atomically.
 
-## Prepare an instance
+## Prepare a database workspace
 
 ```bash
 python3 .agents/skills/setup-influxdb3/scripts/setup.py prepare \
-  --instance-id core-latest --edition core
+  --database-id core-latest --edition core
 
 python3 .agents/skills/setup-influxdb3/scripts/setup.py prepare \
-  --instance-id enterprise-311 --edition enterprise --version 3.11.1
+  --database-id enterprise-311 --edition enterprise --version 3.11.1
 ```
 
-Instances use a file object store and stable node/cluster identifiers. Existing
-instances are immutable with respect to edition, version, and binary checksum.
+Database workspaces use a file object store and stable node/cluster identifiers.
+Existing workspaces are immutable with respect to edition, version, and binary checksum.
 Omitting `--version` resolves the official latest at command execution time;
-it never upgrades an existing instance automatically.
+it never upgrades an existing database workspace automatically.
 
 ## Activate Enterprise
 
@@ -50,7 +50,7 @@ email while it waits:
 ```bash
 export INFLUXDB3_LICENSE_EMAIL=USER@example.com
 python3 .agents/skills/setup-influxdb3/scripts/setup.py activate \
-  --instance-id enterprise-311 --license-type trial
+  --database-id enterprise-311 --license-type trial
 ```
 
 Prefer `--license-email-stdin` when supplying the email interactively or from a
@@ -59,7 +59,7 @@ one line, and uses a non-echoing prompt on a terminal:
 
 ```bash
 python3 .agents/skills/setup-influxdb3/scripts/setup.py activate \
-  --instance-id enterprise-311 --license-type home --license-email-stdin
+  --database-id enterprise-311 --license-type home --license-email-stdin
 ```
 
 Alternatively pass `--license-file /absolute/path/license.jwt`. Override the
@@ -72,10 +72,10 @@ rerun activation safely after verification.
 
 ```bash
 python3 .agents/skills/setup-influxdb3/scripts/setup.py list
-python3 .agents/skills/setup-influxdb3/scripts/setup.py inspect --instance-id core-311
-python3 .agents/skills/setup-influxdb3/scripts/setup.py verify --instance-id core-311
+python3 .agents/skills/setup-influxdb3/scripts/setup.py inspect --database-id core-311
+python3 .agents/skills/setup-influxdb3/scripts/setup.py verify --database-id core-311
 ```
 
-Report the instance ID, edition, exact version, binary path and checksum, and
+Report the database ID, edition, exact version, binary path and checksum, and
 Enterprise license status. Do not add the binary to `PATH` or alter system
 packages or services.

@@ -8,7 +8,7 @@
 ├── queries/<dataset-id>/influx3/<query-set-id>/...
 └── influxdb3/
     ├── installations/...
-    ├── instances/<instance-id>/{manifest.json,data/,logs/}
+    ├── databases/<database-id>/{manifest.json,data/,logs/}
     └── runs/<run-id>/{manifest.json,logs/,results/,summary.json,summary.md}
 ```
 
@@ -33,8 +33,8 @@ timestamp is the dataset end plus one second.
 
 ## Database and target state
 
-Managed instance manifests pin edition, exact version, binary checksum,
-node/cluster identity, SQL database, and one loaded dataset checksum. External
+Managed database manifests pin the database ID, edition, exact version, binary
+checksum, node/cluster identity, SQL database, and one loaded dataset checksum. External
 targets require an explicit edition and may provide multiple URLs only when all
 URLs address the same Core instance or Enterprise cluster. The runner compares
 available `/ping` version metadata but cannot prove cluster membership. Use at
@@ -45,9 +45,10 @@ deletes and recreates it only after exact name confirmation. Never compare a
 `--no-sync` or `--accept-partial` run with the durable default without clearly
 labeling the difference.
 
-Before binding a managed instance to a SQL database, the runner verifies that
-its pinned executable starts for `--version` and reports the expected edition
-and exact version. Repair incomplete installations with `$setup-influxdb3`.
+Before binding a managed database workspace to a SQL database, the runner
+verifies that its pinned executable starts for `--version` and reports the
+expected edition and exact version. Repair incomplete installations with
+`$setup-influxdb3`.
 
 Each managed-server attempt has its own process log and lifecycle event with
 start, readiness, shutdown, exit-code, and forced/unexpected-exit state. The

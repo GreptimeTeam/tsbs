@@ -32,7 +32,7 @@ REPO_ROOT = SCRIPT_PATH.parents[4]
 BENCHMARK_ROOT = REPO_ROOT / ".benchmarks"
 DEFAULT_RUN_ROOT = BENCHMARK_ROOT / "influxdb3" / "runs"
 DEFAULT_QUERY_ROOT = BENCHMARK_ROOT / "queries"
-DEFAULT_INSTANCE_ROOT = BENCHMARK_ROOT / "influxdb3" / "instances"
+DEFAULT_DATABASE_ROOT = BENCHMARK_ROOT / "influxdb3" / "databases"
 DEFAULT_DATASET_ROOT = BENCHMARK_ROOT / "datasets"
 DATASET_RUNNER = REPO_ROOT / ".agents" / "skills" / "generate-tsbs-data" / "scripts" / "generate.py"
 DEFAULT_DATABASE = "benchmark"
@@ -405,22 +405,22 @@ def database_mode_args(mode: str, database: str, confirmation: str | None) -> li
 
 
 def database_workspace(args: argparse.Namespace) -> Path:
-    root = (args.instance_root or DEFAULT_INSTANCE_ROOT).expanduser().resolve()
-    return root / args.instance_id
+    root = (args.database_root or DEFAULT_DATABASE_ROOT).expanduser().resolve()
+    return root / args.database_id
 
 
 def validate_database_manifest(path: Path, expected_id: str | None = None) -> dict[str, Any]:
     manifest = read_json(path / "manifest.json")
-    required = {"schema_version", "kind", "instance_id", "edition", "version", "installation_path", "binary_sha256", "node_id", "cluster_id", "license", "database", "binding"}
-    if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("kind") != "influxdb3-instance" or not required.issubset(manifest):
+    required = {"schema_version", "kind", "database_id", "edition", "version", "installation_path", "binary_sha256", "node_id", "cluster_id", "license", "database", "binding"}
+    if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("kind") != "influxdb3-database" or not required.issubset(manifest):
         raise BenchmarkError(f"malformed database manifest: {path / 'manifest.json'}")
-    if expected_id is not None and manifest["instance_id"] != expected_id:
+    if expected_id is not None and manifest["database_id"] != expected_id:
         raise BenchmarkError(f"database workspace identity mismatch: {path}")
     if manifest["edition"] not in ("core", "enterprise") or manifest["database"] is not None and not isinstance(manifest["database"], str):
         raise BenchmarkError(f"malformed database manifest: {path / 'manifest.json'}")
     binary = Path(manifest["installation_path"]) / "influxdb3"
     if not binary.is_file() or sha256_file(binary) != manifest["binary_sha256"]:
-        raise BenchmarkError(f"instance binary checksum mismatch: {binary}")
+        raise BenchmarkError(f"database binary checksum mismatch: {binary}")
     binding = manifest["binding"]
     binding_fields = {"dataset_id", "spec", "format", "bytes", "sha256"}
     if binding is not None and (not isinstance(binding, dict) or set(binding) != binding_fields or not isinstance(binding.get("spec"), dict)):
@@ -459,15 +459,15 @@ def preflight_managed_binary(manifest: dict[str, Any]) -> None:
 def prepare_database_workspace(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     path = database_workspace(args); manifest_path = path / "manifest.json"
     if not manifest_path.exists():
-        raise BenchmarkError(f"managed instance is not prepared; use $setup-influxdb3 first: {path}")
-    manifest = validate_database_manifest(path, args.instance_id)
+        raise BenchmarkError(f"managed database is not prepared; use $setup-influxdb3 first: {path}")
+    manifest = validate_database_manifest(path, args.database_id)
     preflight_managed_binary(manifest)
     if manifest["edition"] == "enterprise" and manifest.get("license", {}).get("status") != "active":
-        raise BenchmarkError("managed Enterprise instance does not have an active license")
+        raise BenchmarkError("managed Enterprise database does not have an active license")
     if manifest["database"] is None:
         manifest["database"] = args.database; manifest["updated_at"] = utc_now(); save_json(manifest_path, manifest)
     elif manifest["database"] != args.database:
-        raise BenchmarkError("managed instance is bound to a different SQL database")
+        raise BenchmarkError("managed database workspace is bound to a different SQL database")
     return path, manifest
 
 
@@ -601,7 +601,7 @@ def check_port_available(port: int, timeout: float = 2.0) -> None:
 
 @contextlib.contextmanager
 def connection(args: argparse.Namespace, run_dir: Path, manifest: dict[str, Any]) -> Iterator[tuple[str, bool, dict[str, Any] | None, Path | None]]:
-    if bool(args.instance_id) == bool(args.url): raise BenchmarkError("provide exactly one of --instance-id or --url")
+    if bool(args.database_id) == bool(args.url): raise BenchmarkError("provide exactly one of --database-id or --url")
     if args.url:
         token = os.environ.get(args.auth_token_env, "")
         for url in args.url:
@@ -680,7 +680,7 @@ def add_run_options(parser: argparse.ArgumentParser) -> None:
 
 
 def add_connection_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--instance-id"); parser.add_argument("--instance-root", type=Path); parser.add_argument("--url", action="append"); parser.add_argument("--edition", choices=("core", "enterprise")); parser.add_argument("--http-port", type=int, default=8181); parser.add_argument("--startup-timeout", type=int, default=60); parser.add_argument("--database", help=f"SQL database name (default: {DEFAULT_DATABASE})"); parser.add_argument("--auth-token-env", default="INFLUXDB3_AUTH_TOKEN"); parser.add_argument("--admin-token-env", default="INFLUXDB3_ADMIN_TOKEN")
+    parser.add_argument("--database-id"); parser.add_argument("--database-root", type=Path); parser.add_argument("--url", action="append"); parser.add_argument("--edition", choices=("core", "enterprise")); parser.add_argument("--http-port", type=int, default=8181); parser.add_argument("--startup-timeout", type=int, default=60); parser.add_argument("--database", help=f"SQL database name (default: {DEFAULT_DATABASE})"); parser.add_argument("--auth-token-env", default="INFLUXDB3_AUTH_TOKEN"); parser.add_argument("--admin-token-env", default="INFLUXDB3_ADMIN_TOKEN")
 
 
 def add_load_options(parser: argparse.ArgumentParser) -> None:
@@ -702,12 +702,12 @@ def validate_args(args: argparse.Namespace) -> None:
     for name in ("scale", "load_workers", "query_workers", "batch_size", "queries"):
         value = getattr(args, name, None)
         if value is not None and value <= 0: raise BenchmarkError(f"--{name.replace('_', '-')} must be positive")
-    for name in ("dataset_id", "instance_id"):
+    for name in ("dataset_id", "database_id"):
         value = getattr(args, name, None)
         if value and not ID_RE.fullmatch(value): raise BenchmarkError(f"--{name.replace('_', '-')} contains invalid characters")
     if args.command in ("load", "query", "all"):
-        if bool(args.instance_id) == bool(args.url): raise BenchmarkError("provide exactly one of --instance-id or --url")
-        if args.instance_id and args.edition: raise BenchmarkError("managed instance edition comes from its manifest; omit --edition")
+        if bool(args.database_id) == bool(args.url): raise BenchmarkError("provide exactly one of --database-id or --url")
+        if args.database_id and args.edition: raise BenchmarkError("managed database edition comes from its manifest; omit --edition")
         if args.url and not args.edition: raise BenchmarkError("external targets require --edition=core|enterprise")
         for url in args.url or []:
             parsed = urllib.parse.urlparse(url)
@@ -736,8 +736,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 server = {"version": database_manifest.get("version"), "revision": None, "build": None} if managed else probe_servers(args.url, os.environ.get(args.auth_token_env, ""))
                 if previous and server["version"] is None:
                     server = {key: previous.get(key) for key in ("version", "revision", "build")}
-                target = {"mode": "managed" if managed else "external", "urls": endpoint.split(","), "database": args.database, "instance_id": args.instance_id if managed else None, "edition": edition, "version": server["version"], "revision": server["revision"], "build": server["build"], "binary_sha256": database_manifest.get("binary_sha256") if managed else None, "no_sync": getattr(args, "no_sync", previous.get("no_sync", False)), "accept_partial": getattr(args, "accept_partial", previous.get("accept_partial", False))}
-                identity = ("mode", "urls", "database", "instance_id", "edition", "version", "binary_sha256")
+                target = {"mode": "managed" if managed else "external", "urls": endpoint.split(","), "database": args.database, "database_id": args.database_id if managed else None, "edition": edition, "version": server["version"], "revision": server["revision"], "build": server["build"], "binary_sha256": database_manifest.get("binary_sha256") if managed else None, "no_sync": getattr(args, "no_sync", previous.get("no_sync", False)), "accept_partial": getattr(args, "accept_partial", previous.get("accept_partial", False))}
+                identity = ("mode", "urls", "database", "database_id", "edition", "version", "binary_sha256")
                 if args.command in ("load", "all"):
                     identity += ("no_sync", "accept_partial")
                 if previous and any(previous.get(key) != target.get(key) for key in identity):
