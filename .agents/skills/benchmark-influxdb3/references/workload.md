@@ -23,13 +23,19 @@ workers, batch sizes, and durability flags for comparisons.
 | Start | `2023-06-11T00:00:00Z` | `2023-06-11T00:00:00Z` |
 | End | `2023-06-14T00:00:00Z` | `2023-06-12T00:00:00Z` |
 | Hosts | 4000 | 10 |
-| Load workers | 6 | 2 |
+| Load workers | 16 | 2 |
 | Query workers | 1 | 1 |
-| Batch size | 3000 | 3000 |
+| Batch size | 25000 | 3000 |
 
 Both use seed `123`, interval `10s`, `cpu-only` data, `devops` queries,
 durable WAL acknowledgement, and rejection of partial batches. The query end
 timestamp is the dataset end plus one second.
+
+The manual load settings are InfluxDB-specific overrides selected by
+`docs/influx3-ingestion-benchmark.md`; shared TSBS and GreptimeDB profile
+defaults remain unchanged. Explicit `--load-workers` and `--batch-size` flags
+take precedence. Core 3.11.1 rejected a 100,000-row batch because its encoded
+request exceeded 10 MiB, so do not assume arbitrarily larger batches are valid.
 
 ## Database and target state
 

@@ -32,8 +32,8 @@ gunzip -c /tmp/influx3-data.gz | tsbs_load_influx3 \
   --db-name=benchmark \
   --auth-token="$INFLUXDB3_AUTH_TOKEN" \
   --admin-token="$INFLUXDB3_ADMIN_TOKEN" \
-  --workers=4 \
-  --batch-size=10000
+  --workers=16 \
+  --batch-size=25000
 ```
 
 The loader sends line protocol to `/api/v3/write_lp` with nanosecond
@@ -41,6 +41,10 @@ precision. Gzip is enabled, invalid batches are rejected atomically, and
 durable WAL acknowledgement is used by default. Use `--no-sync` only for a
 separately labelled durability/performance experiment, and use
 `--accept-partial` only if partial batch acceptance is intentional.
+These recommended durable settings were selected by the
+[InfluxDB 3 ingestion tuning benchmark](influx3-ingestion-benchmark.md). For
+non-durable throughput experiments, that benchmark recommends eight workers,
+a 3,000-row batch, and explicit `--no-sync`.
 
 By default the loader creates the benchmark database, replacing one with the
 same name. Set `--do-abort-on-exist` to stop instead of replacing it.
