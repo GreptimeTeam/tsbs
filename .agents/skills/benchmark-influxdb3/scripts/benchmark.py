@@ -54,6 +54,7 @@ DEFAULT_DATABASE_ROOT = BENCHMARK_ROOT / "influxdb3" / "databases"
 DEFAULT_DATASET_ROOT = BENCHMARK_ROOT / "datasets"
 DATASET_RUNNER = REPO_ROOT / ".agents" / "skills" / "generate-tsbs-data" / "scripts" / "generate.py"
 DEFAULT_DATABASE = "benchmark"
+MANUAL_LOAD_DEFAULTS = {"load_workers": 16, "batch_size": 25000}
 SCHEMA_VERSION = 1
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DATA_WORKLOAD_OPTIONS = ("start", "end", "scale", "seed", "log_interval")
@@ -115,7 +116,15 @@ def prepare_run(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         validate_run_manifest(manifest, manifest_path)
         workload_options = ("profile", "start", "end", "scale", "seed", "log_interval", "load_workers", "query_workers", "batch_size", "queries", "query_type")
         if any(getattr(args, name, None) is not None for name in workload_options):
-            requested = build_workload(args, manifest["workload"])
+            requested = build_workload(
+                args,
+                manifest["workload"],
+                defaults=(
+                    MANUAL_LOAD_DEFAULTS
+                    if (args.profile or manifest["profile"]) == "manual"
+                    else None
+                ),
+            )
             if requested != manifest["workload"]:
                 raise BenchmarkError("run workload is immutable; create a new run for different settings")
     else:
@@ -123,7 +132,11 @@ def prepare_run(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         manifest = {
             "schema_version": SCHEMA_VERSION, "kind": "influxdb3-run", "run_id": run_dir.name,
             "created_at": utc_now(), "profile": profile, "database": getattr(args, "database", DEFAULT_DATABASE),
-            "workload": build_workload(args), "events": {"loads": [], "queries": [], "servers": []},
+            "workload": build_workload(
+                args,
+                defaults=MANUAL_LOAD_DEFAULTS if profile == "manual" else None,
+            ),
+            "events": {"loads": [], "queries": [], "servers": []},
         }
     if hasattr(args, "database") and manifest.get("database") != args.database and manifest_path.exists():
         raise BenchmarkError("--database conflicts with the database pinned by this run")
@@ -585,7 +598,7 @@ def connection(args: argparse.Namespace, run_dir: Path, manifest: dict[str, Any]
                 event.update(shutdown_expected=True, shutdown_started_at=utc_now()); save_manifest(run_dir, manifest)
                 os.killpg(process.pid, signal.SIGTERM)
                 try:
-                    return_code = process.wait(timeout=15)
+                    return_code = process.wait(timeout=args.shutdown_timeout)
                 except subprocess.TimeoutExpired:
                     event["forced_shutdown"] = True
                     os.killpg(process.pid, signal.SIGKILL); return_code = process.wait(timeout=5)
@@ -609,7 +622,7 @@ def add_run_options(parser: argparse.ArgumentParser) -> None:
 
 
 def add_connection_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--database-id"); parser.add_argument("--database-root", type=Path); parser.add_argument("--url", action="append"); parser.add_argument("--edition", choices=("core", "enterprise")); parser.add_argument("--http-port", type=int, default=8181); parser.add_argument("--startup-timeout", type=int, default=60); parser.add_argument("--database", help=f"SQL database name (default: {DEFAULT_DATABASE})"); parser.add_argument("--auth-token-env", default="INFLUXDB3_AUTH_TOKEN"); parser.add_argument("--admin-token-env", default="INFLUXDB3_ADMIN_TOKEN")
+    parser.add_argument("--database-id"); parser.add_argument("--database-root", type=Path); parser.add_argument("--url", action="append"); parser.add_argument("--edition", choices=("core", "enterprise")); parser.add_argument("--http-port", type=int, default=8181); parser.add_argument("--startup-timeout", type=int, default=60); parser.add_argument("--shutdown-timeout", type=int, default=60, help="seconds to wait for a managed server to flush and stop"); parser.add_argument("--database", help=f"SQL database name (default: {DEFAULT_DATABASE})"); parser.add_argument("--auth-token-env", default="INFLUXDB3_AUTH_TOKEN"); parser.add_argument("--admin-token-env", default="INFLUXDB3_ADMIN_TOKEN")
 
 
 def add_load_options(parser: argparse.ArgumentParser) -> None:
@@ -635,6 +648,8 @@ def validate_args(args: argparse.Namespace) -> None:
         value = getattr(args, name, None)
         if value and not ID_RE.fullmatch(value): raise BenchmarkError(f"--{name.replace('_', '-')} contains invalid characters")
     if args.command in ("load", "query", "all"):
+        if args.startup_timeout <= 0: raise BenchmarkError("--startup-timeout must be positive")
+        if args.shutdown_timeout <= 0: raise BenchmarkError("--shutdown-timeout must be positive")
         if bool(args.database_id) == bool(args.url): raise BenchmarkError("provide exactly one of --database-id or --url")
         if args.database_id and args.edition: raise BenchmarkError("managed database edition comes from its manifest; omit --edition")
         if args.url and not args.edition: raise BenchmarkError("external targets require --edition=core|enterprise")

@@ -127,6 +127,38 @@ class QuerySetIdentityTests(unittest.TestCase):
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_manual_load_defaults_are_influxdb_specific_and_overridable(self) -> None:
+        parser = benchmark.make_parser()
+        manual = parser.parse_args(["generate", "--only", "data"])
+        smoke = parser.parse_args(["generate", "--only", "data", "--profile", "smoke"])
+        overridden = parser.parse_args([
+            "generate", "--only", "data", "--batch-size", "7000", "--load-workers", "3",
+        ])
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manual.run_root = root / "manual"
+            smoke.run_root = root / "smoke"
+            overridden.run_root = root / "overridden"
+            manual_dir, manual_manifest = benchmark.prepare_run(manual)
+            _, smoke_manifest = benchmark.prepare_run(smoke)
+            _, overridden_manifest = benchmark.prepare_run(overridden)
+            reopened = parser.parse_args([
+                "generate", "--run-dir", str(manual_dir), "--only", "data",
+                "--profile", "manual",
+            ])
+            _, reopened_manifest = benchmark.prepare_run(reopened)
+
+        self.assertEqual(manual_manifest["workload"]["batch_size"], 25000)
+        self.assertEqual(manual_manifest["workload"]["load_workers"], 16)
+        self.assertEqual(reopened_manifest["workload"], manual_manifest["workload"])
+        self.assertEqual(benchmark.build_workload(manual)["batch_size"], 3000)
+        self.assertEqual(benchmark.build_workload(manual)["load_workers"], 6)
+        self.assertEqual(smoke_manifest["workload"]["batch_size"], 3000)
+        self.assertEqual(smoke_manifest["workload"]["load_workers"], 2)
+        self.assertEqual(overridden_manifest["workload"]["batch_size"], 7000)
+        self.assertEqual(overridden_manifest["workload"]["load_workers"], 3)
+
     def test_port_probe_enables_address_reuse_and_retries(self) -> None:
         sock = mock.MagicMock(); sock.__enter__.return_value = sock
         with mock.patch.object(benchmark.socket, "socket", return_value=sock):
@@ -339,6 +371,25 @@ class ManagedDatabaseTests(unittest.TestCase):
 
 
 class TargetTests(unittest.TestCase):
+    def test_sync_is_default_and_no_sync_is_opt_in(self) -> None:
+        parser = benchmark.make_parser()
+        durable = parser.parse_args(["load", "--database-id", "db-a"])
+        non_durable = parser.parse_args([
+            "load", "--database-id", "db-a", "--no-sync",
+        ])
+        self.assertFalse(durable.no_sync)
+        self.assertEqual(durable.shutdown_timeout, 60)
+        self.assertTrue(non_durable.no_sync)
+
+    def test_managed_server_timeouts_must_be_positive(self) -> None:
+        for option in ("--startup-timeout", "--shutdown-timeout"):
+            args = benchmark.make_parser().parse_args([
+                "load", "--database-id", "db-a", option, "0",
+            ])
+            benchmark.resolve_database(args)
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "must be positive"):
+                benchmark.validate_args(args)
+
     def test_external_target_validation_and_token_redaction(self) -> None:
         args = benchmark.make_parser().parse_args([
             "all", "--url", "http://node-a:8181", "--url", "http://node-b:8181",

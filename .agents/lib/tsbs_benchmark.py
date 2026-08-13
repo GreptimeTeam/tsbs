@@ -137,12 +137,16 @@ def add_one_second(timestamp: str) -> str:
 
 
 def build_workload(
-    args: argparse.Namespace, base: dict[str, Any] | None = None
+    args: argparse.Namespace,
+    base: dict[str, Any] | None = None,
+    defaults: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if base is not None and not args.profile:
         workload = json.loads(json.dumps(base))
     else:
         workload = json.loads(json.dumps(PROFILES[args.profile or "manual"]))
+        if defaults:
+            workload.update(defaults)
     for attr in (
         "start",
         "end",

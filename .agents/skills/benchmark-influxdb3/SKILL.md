@@ -23,6 +23,10 @@ the verified repository-local fallback.
    explicitly confirmed `reset`. Never infer reset authorization.
 4. Keep durable writes and atomic batch rejection unless the user explicitly
    requests `--no-sync` or `--accept-partial`.
+5. The manual profile defaults to 25,000-row batches and 16 load workers. For
+   the measured non-durable throughput recipe, pass `--batch-size 3000`,
+   `--load-workers 8`, and `--no-sync`; see
+   `docs/influx3-ingestion-benchmark.md`.
 
 ## Run benchmarks
 
