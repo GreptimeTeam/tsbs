@@ -17,8 +17,13 @@ from typing import Any, Sequence
 
 SCRIPT_PATH = Path(__file__).resolve()
 REPO_ROOT = SCRIPT_PATH.parents[4]
+sys.path.insert(0, str(REPO_ROOT / ".agents" / "lib"))
+
+from tsbs_environment import TsbsEnvironmentError, resolve_go  # noqa: E402
+
 DEFAULT_DATASET_ROOT = REPO_ROOT / ".benchmarks" / "datasets"
 GENERATOR = REPO_ROOT / "bin" / "tsbs_generate_data"
+GENERATOR_BUILD_METADATA = REPO_ROOT / "bin" / "tsbs_generate_data.build.json"
 SCHEMA_VERSION = 1
 FORMAT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -161,13 +166,19 @@ def command_text(command: Sequence[str]) -> str:
     return " ".join(subprocess.list2cmdline([part]) for part in command)
 
 
-def run_build(log_path: Path, rebuild: bool) -> None:
+def run_build(log_path: Path, rebuild: bool) -> dict[str, Any] | None:
     if GENERATOR.is_file() and not rebuild:
-        return
+        if GENERATOR_BUILD_METADATA.is_file():
+            metadata = read_json(GENERATOR_BUILD_METADATA)
+            if metadata.get("binary_sha256") == sha256_file(GENERATOR) and isinstance(metadata.get("go_toolchain"), dict):
+                return metadata["go_toolchain"]
+        return None
     GENERATOR.parent.mkdir(parents=True, exist_ok=True)
-    command = ["go", "build", "-o", str(GENERATOR), "./cmd/tsbs_generate_data"]
+    toolchain = resolve_go()
+    command = [toolchain["binary"], "build", "-o", str(GENERATOR), "./cmd/tsbs_generate_data"]
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as log:
+        log.write(f"# Go toolchain: {json.dumps(toolchain, sort_keys=True)}\n")
         header = f"$ {command_text(command)}\n"
         log.write(header)
         print(header, end="", file=sys.stderr)
@@ -186,6 +197,11 @@ def run_build(log_path: Path, rebuild: bool) -> None:
         process.stdout.close()
         if process.wait():
             raise DatasetError(f"failed to build tsbs_generate_data; see {log_path}")
+    save_json(
+        GENERATOR_BUILD_METADATA,
+        {"binary": "bin/tsbs_generate_data", "binary_sha256": sha256_file(GENERATOR), "built_at": utc_now(), "go_toolchain": toolchain},
+    )
+    return toolchain
 
 
 def git_revision() -> str | None:
@@ -223,7 +239,7 @@ def generate_variant(
             return result(dataset_dir, dataset_manifest, manifest, reused=True)
 
     variant_dir.mkdir(parents=True, exist_ok=True)
-    run_build(log_path, rebuild)
+    toolchain = run_build(log_path, rebuild)
     spec = dataset_manifest["spec"]
     command = [
         str(GENERATOR),
@@ -289,6 +305,7 @@ def generate_variant(
             "binary": "bin/tsbs_generate_data",
             "binary_sha256": sha256_file(GENERATOR),
             "git_revision": git_revision(),
+            **({"go_toolchain": toolchain} if toolchain else {}),
         },
     }
     save_json(manifest_path, manifest)
@@ -518,7 +535,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             save_json(args.result_file.resolve(), output)
         print_output(output, args.json)
         return 0
-    except (DatasetError, OSError) as exc:
+    except (DatasetError, TsbsEnvironmentError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

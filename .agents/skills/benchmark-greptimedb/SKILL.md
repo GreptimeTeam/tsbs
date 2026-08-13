@@ -9,7 +9,9 @@ Use `scripts/benchmark.py` for execution and structured result parsing. Read
 `references/workload.md` before selecting workload sizes, query types, database
 modes, or shared workspace identifiers. Use `$generate-tsbs-data` for standalone
 dataset generation, inspection, or non-Greptime serialization formats. Use
-`$setup-greptimedb` to install and prepare a managed database workspace.
+`$setup-greptimedb` to install and prepare a managed database workspace. Builds
+automatically use `$setup-tsbs-environment` to reuse Go 1.21+ or prepare the
+verified repository-local fallback.
 
 ## Collect inputs
 

@@ -7,7 +7,9 @@ description: Prepare logical TSBS dataset metadata and generate, cache, inspect,
 
 Use `scripts/generate.py` for deterministic logical dataset identity,
 generation, and validation. Read `references/datasets.md` when choosing
-profiles, formats, or shared roots.
+profiles, formats, or shared roots. Binary builds automatically use
+`$setup-tsbs-environment` to reuse Go 1.21+ or prepare the verified
+repository-local fallback.
 
 ## Prepare metadata only
 

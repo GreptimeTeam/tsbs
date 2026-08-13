@@ -42,6 +42,7 @@ from tsbs_benchmark import (  # noqa: E402
     sha256_file,
     utc_now,
 )
+from tsbs_environment import TsbsEnvironmentError, resolve_go  # noqa: E402
 from summarize import write_summary
 
 
@@ -58,6 +59,7 @@ ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DATA_WORKLOAD_OPTIONS = ("start", "end", "scale", "seed", "log_interval")
 BINARIES = {"queries": "tsbs_generate_queries", "load": "tsbs_load_influx3", "query": "tsbs_run_queries_influx3"}
 BUILT_THIS_PROCESS: set[str] = set()
+GO_TOOLCHAIN: dict[str, Any] | None = None
 
 
 class BenchmarkError(RuntimeError):
@@ -172,15 +174,25 @@ def binary_needs_build(run_dir: Path, name: str, target: Path, rebuild: bool) ->
     return name not in BUILT_THIS_PROCESS and (rebuild or not (target.exists() and marker.exists()))
 
 
-def ensure_binaries(run_dir: Path, stages: Sequence[str], rebuild: bool) -> None:
+def ensure_binaries(run_dir: Path, stages: Sequence[str], rebuild: bool) -> dict[str, dict[str, Any]]:
+    global GO_TOOLCHAIN
+    built: dict[str, dict[str, Any]] = {}
     for stage in stages:
         name = BINARIES[stage]; target = REPO_ROOT / "bin" / name
         marker = run_dir / "results" / f"built-{name}"
         if not binary_needs_build(run_dir, name, target, rebuild):
             continue
+        if GO_TOOLCHAIN is None:
+            GO_TOOLCHAIN = resolve_go()
         target.parent.mkdir(parents=True, exist_ok=True)
-        run_tee(["go", "build", "-o", str(target), f"./cmd/{name}"], run_dir / "logs" / "build.log", append=True)
-        marker.write_text(utc_now() + "\n", encoding="utf-8"); BUILT_THIS_PROCESS.add(name)
+        build_log = run_dir / "logs" / "build.log"
+        build_log.parent.mkdir(parents=True, exist_ok=True)
+        with build_log.open("a", encoding="utf-8") as log:
+            log.write(f"# Go toolchain: {json.dumps(GO_TOOLCHAIN, sort_keys=True)}\n")
+        run_tee([GO_TOOLCHAIN["binary"], "build", "-o", str(target), f"./cmd/{name}"], build_log, append=True)
+        metadata = {"binary": f"bin/{name}", "binary_sha256": sha256_file(target), "built_at": utc_now(), "go_toolchain": GO_TOOLCHAIN}
+        save_json(marker, metadata); built[name] = metadata; BUILT_THIS_PROCESS.add(name)
+    return built
 
 
 def dataset_selection_args(args: argparse.Namespace, manifest: dict[str, Any]) -> list[str]:
@@ -290,7 +302,7 @@ def generate_queries(args: argparse.Namespace, run_dir: Path, manifest: dict[str
     if destination.exists():
         set_manifest = validate_query_set(destination, spec); reused = True
     else:
-        ensure_binaries(run_dir, ["queries"], args.rebuild)
+        build_metadata = ensure_binaries(run_dir, ["queries"], args.rebuild)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix=f".{set_id}-", dir=destination.parent))
         try:
@@ -301,7 +313,10 @@ def generate_queries(args: argparse.Namespace, run_dir: Path, manifest: dict[str
                 run_tee(command, run_dir / "logs" / f"generate-query-{query_type}.log", stdout_path=output)
                 files[query_type] = {"path": f"queries/{query_type}.dat", "bytes": output.stat().st_size, "sha256": sha256_file(output)}
             binary = REPO_ROOT / "bin" / BINARIES["queries"]
-            set_manifest = {"schema_version": SCHEMA_VERSION, "kind": "influxdb3-query-set", "query_set_id": set_id, "created_at": utc_now(), "spec": spec, "generator": {"binary": "bin/tsbs_generate_queries", "binary_sha256": sha256_file(binary), "git_revision": git_revision()}, "files": files}
+            generator = {"binary": "bin/tsbs_generate_queries", "binary_sha256": sha256_file(binary), "git_revision": git_revision()}
+            if BINARIES["queries"] in build_metadata:
+                generator["go_toolchain"] = build_metadata[BINARIES["queries"]]["go_toolchain"]
+            set_manifest = {"schema_version": SCHEMA_VERSION, "kind": "influxdb3-query-set", "query_set_id": set_id, "created_at": utc_now(), "spec": spec, "generator": generator, "files": files}
             save_json(temporary / "manifest.json", set_manifest)
             try:
                 os.replace(temporary, destination)
@@ -660,7 +675,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.command in ("load", "all"): load_data(args, run_dir, manifest, endpoint, managed, database_manifest, database_path)
                 if args.command in ("query", "all"): run_queries(args, run_dir, manifest, endpoint, database_manifest)
         summary = write_summary(run_dir, manifest); print(f"Run directory: {run_dir}"); print(f"Summary: {run_dir / 'summary.md'}"); return 1 if summary["failures"] else 0
-    except (BenchmarkError, OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (BenchmarkError, TsbsEnvironmentError, OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
         if run_dir is not None and manifest is not None:
             try: write_summary(run_dir, manifest)
             except OSError: pass
