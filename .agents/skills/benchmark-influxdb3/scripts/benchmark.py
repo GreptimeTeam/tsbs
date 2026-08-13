@@ -40,7 +40,9 @@ from tsbs_benchmark import (  # noqa: E402
     relative,
     save_json,
     sha256_file,
+    tee_stream,
     utc_now,
+    write_streams,
 )
 from tsbs_environment import TsbsEnvironmentError, resolve_go  # noqa: E402
 from summarize import write_summary
@@ -158,12 +160,11 @@ def run_tee(command: Sequence[str], log_path: Path, *, stdout_path: Path | None 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open(mode, encoding="utf-8") as log:
         header = f"$ {display_command(command)}\n"
-        log.write(header); log.flush(); print(header, end="")
+        write_streams(header, sys.stdout, log)
         if stdout_path is None:
             process = subprocess.Popen(command, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             assert process.stdout is not None
-            for line in process.stdout:
-                sys.stdout.write(line); log.write(line)
+            tee_stream(process.stdout, sys.stdout, log)
             process.stdout.close(); return_code = process.wait()
         else:
             stdout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,8 +172,7 @@ def run_tee(command: Sequence[str], log_path: Path, *, stdout_path: Path | None 
             with temporary_output.open("wb") as output:
                 process = subprocess.Popen(command, cwd=REPO_ROOT, stdout=output, stderr=subprocess.PIPE, text=True, bufsize=1)
                 assert process.stderr is not None
-                for line in process.stderr:
-                    sys.stdout.write(line); log.write(line)
+                tee_stream(process.stderr, sys.stdout, log)
                 process.stderr.close(); return_code = process.wait()
         if return_code:
             if stdout_path is not None:
