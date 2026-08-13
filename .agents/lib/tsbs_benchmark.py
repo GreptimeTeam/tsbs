@@ -12,7 +12,7 @@ import math
 import os
 import re
 from pathlib import Path
-from typing import Any, Callable, Iterator, Sequence, TypeVar
+from typing import Any, Callable, Iterable, Iterator, Sequence, TextIO, TypeVar
 
 
 RESULT_FORMAT_VERSION = "0.2"
@@ -85,6 +85,19 @@ ErrorType = TypeVar("ErrorType", bound=Exception)
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def write_streams(text: str, *destinations: TextIO) -> None:
+    """Write text to every destination and make it immediately observable."""
+    for destination in destinations:
+        destination.write(text)
+        destination.flush()
+
+
+def tee_stream(source: Iterable[str], *destinations: TextIO) -> None:
+    """Copy a text stream and flush every complete line to each destination."""
+    for line in source:
+        write_streams(line, *destinations)
 
 
 def canonical_json(value: Any) -> str:
