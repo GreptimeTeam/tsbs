@@ -94,3 +94,70 @@ InfluxDB Core limits write request bodies to 10 MiB for this setup. The
 100,000-row request exceeded that limit, so 200,000- and 300,000-row requests
 were not attempted. The managed runner waits up to 60 seconds for shutdown so
 accepted no-sync writes can flush before the server is stopped.
+
+## Memory usage
+
+Memory was measured on the same 16 GiB, 10-core macOS ARM64 host using the
+8.64-million-row dataset. Resident set size (RSS) for the InfluxDB server and
+TSBS loader was sampled every 50 ms. Server peak includes the graceful
+post-load flush; combined peak is the maximum simultaneously sampled server
+plus loader RSS, or the later server-only peak if higher. Every trial ingested
+exactly 8.64 million rows and 86.4 million metrics and stopped cleanly.
+
+These are single-run directional measurements, not stable medians. The host
+was already under severe memory pressure (about 34 GiB of swap in use), which
+can affect both RSS and throughput. Compare relative trends within this table,
+and rerun from a clean boot for capacity planning.
+
+### No-sync memory
+
+| Batch rows | Workers | Rows/s | Server peak (MiB) | Loader peak (MiB) | Combined peak (MiB) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 3,000 | 2 | 470,934 | 1,599 | 138 | 1,599 |
+| 10,000 | 2 | 468,638 | 1,630 | 136 | 1,750 |
+| 25,000 | 2 | 475,043 | 1,672 | 411 | 2,060 |
+| 30,000 | 2 | 478,263 | 1,671 | 422 | 2,034 |
+| 3,000 | 8 | 970,078 | 3,682 | 286 | 3,682 |
+| 10,000 | 8 | 1,113,098 | 4,785 | 355 | 4,785 |
+| 25,000 | 8 | 1,044,630 | 4,541 | 1,152 | 5,281 |
+| 30,000 | 8 | 973,623 | 4,552 | 1,194 | 4,663 |
+| 3,000 | 16 | 1,074,099 | 4,474 | 481 | 4,955 |
+| 10,000 | 16 | 1,059,085 | 4,342 | 574 | 4,376 |
+| 25,000 | 16 | 936,068 | 4,650 | 1,457 | 4,650 |
+| 30,000 | 16 | 923,904 | 5,149 | 1,626 | 5,149 |
+
+At two workers, larger batches increased loader RSS without materially
+improving throughput. At eight or 16 workers, 25,000- and 30,000-row batches
+used more than 1 GiB of loader RSS and were slower than smaller batches. The
+3,000-row, eight-worker recommendation remains a good memory/performance
+balance; 10,000 rows and eight workers was 15% faster in this run but increased
+server peak RSS by about 1.1 GiB.
+
+### Sync memory
+
+Only previously fast sync configurations were measured to avoid long
+acknowledgement-bound trials:
+
+| Batch rows | Workers | Rows/s | Server peak (MiB) | Loader peak (MiB) | Combined peak (MiB) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 16 | 160,117 | 971 | 613 | 1,553 |
+| 25,000 | 8 | 197,443 | 895 | 1,063 | 1,904 |
+| 25,000 | 16 | 363,351 | 1,165 | 1,467 | 2,475 |
+| 30,000 | 8 | 233,442 | 1,144 | 1,218 | 2,324 |
+| 30,000 | 16 | 342,708 | 1,414 | 1,772 | 3,100 |
+
+The selected durable default, 25,000 rows and 16 workers, was the fastest sync
+cell and used about 2.42 GiB combined peak RSS. Increasing the batch to 30,000
+rows reduced throughput by 5.7% while adding about 625 MiB of combined peak
+RSS, reinforcing the 25,000-row choice.
+
+For matching cells, sync used substantially less server and combined peak RSS
+than no-sync because durable acknowledgements bound in-flight writes:
+
+| Batch rows | Workers | Sync combined (MiB) | No-sync combined (MiB) | Sync reduction |
+| ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 16 | 1,553 | 4,376 | 65% |
+| 25,000 | 8 | 1,904 | 5,281 | 64% |
+| 25,000 | 16 | 2,475 | 4,650 | 47% |
+| 30,000 | 8 | 2,324 | 4,663 | 50% |
+| 30,000 | 16 | 3,100 | 5,149 | 40% |
