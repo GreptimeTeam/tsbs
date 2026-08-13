@@ -51,6 +51,17 @@ The durable default is therefore 25,000 rows and 16 workers. This is about 53
 times the 6,029 rows/s measured for the previous 3,000-row, two-worker default
 on the same dataset.
 
+To remove the small dataset's request-count limitation, 25,000 and 30,000 rows
+were also compared at 16 workers on the 8.64-million-row dataset:
+
+| Batch rows | Workers | Run 1 | Run 2 | Run 3 | Median rows/s |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 25,000 | 16 | 371,399 | 349,529 | 363,538 | 363,538 |
+| 30,000 | 16 | 297,017 | 327,809 | 335,675 | 327,809 |
+
+The larger dataset confirms 25,000 rows: its median was 10.9% higher than
+30,000 rows, with every run accepting all 8.64 million rows.
+
 ## No-sync results
 
 At two workers, batch size had little effect: 3,000, 10,000, 20,000, 25,000,
