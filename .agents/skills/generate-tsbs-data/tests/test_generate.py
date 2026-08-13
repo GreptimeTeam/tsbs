@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import stat
 import sys
@@ -200,6 +201,39 @@ class DatasetVariantTests(unittest.TestCase):
             result = json.loads(result_file.read_text(encoding="utf-8"))
             self.assertEqual(result["format"], "influx")
             self.assertTrue(Path(result["data_path"]).is_file())
+
+    def test_build_uses_resolved_absolute_go_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            generator = root / "bin" / "tsbs_generate_data"
+            build_metadata = root / "bin" / "tsbs_generate_data.build.json"
+            toolchain = {"source": "managed", "version": "1.21.13", "binary": "/managed/go", "binary_sha256": "a" * 64}
+
+            class Process:
+                stdout = io.StringIO("")
+
+                def wait(self):
+                    generator.parent.mkdir(parents=True, exist_ok=True)
+                    generator.write_text("binary", encoding="utf-8")
+                    return 0
+
+            with mock.patch.object(generate, "REPO_ROOT", root), mock.patch.object(generate, "GENERATOR", generator), mock.patch.object(
+                generate, "GENERATOR_BUILD_METADATA", build_metadata
+            ), mock.patch.object(
+                generate, "resolve_go", return_value=toolchain
+            ), mock.patch.object(generate.subprocess, "Popen", return_value=Process()) as popen:
+                selected = generate.run_build(root / "build.log", False)
+            self.assertEqual(selected, toolchain)
+            self.assertEqual(popen.call_args.args[0][0], "/managed/go")
+            self.assertEqual(json.loads(build_metadata.read_text(encoding="utf-8"))["go_toolchain"], toolchain)
+            self.assertIn('"source": "managed"', (root / "build.log").read_text(encoding="utf-8"))
+
+            with mock.patch.object(generate, "GENERATOR", generator), mock.patch.object(generate, "GENERATOR_BUILD_METADATA", build_metadata), mock.patch.object(
+                generate, "resolve_go"
+            ) as resolver:
+                reused = generate.run_build(root / "build.log", False)
+            self.assertEqual(reused, toolchain)
+            resolver.assert_not_called()
 
 
 if __name__ == "__main__":

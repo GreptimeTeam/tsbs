@@ -9,6 +9,8 @@ Use `scripts/benchmark.py` for execution and structured result parsing. Read
 `references/workload.md` before choosing workloads, editions, durability flags,
 or database modes. Use `$setup-influxdb3` to install and prepare a managed
 database workspace and `$generate-tsbs-data` for standalone dataset operations.
+Builds automatically use `$setup-tsbs-environment` to reuse Go 1.21+ or prepare
+the verified repository-local fallback.
 
 ## Collect inputs
 

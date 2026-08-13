@@ -175,6 +175,27 @@ class QuerySetTests(unittest.TestCase):
             self.assertTrue(all(event["file_sha256"] for event in manifest["events"]["queries"]))
 
 
+class BuildEnvironmentTests(unittest.TestCase):
+    def test_build_uses_resolved_go_and_records_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); run_dir = root / "run"
+            (run_dir / "results").mkdir(parents=True); (run_dir / "logs").mkdir()
+            toolchain = {"source": "managed", "version": "1.21.13", "binary": "/managed/go", "binary_sha256": "a" * 64}
+
+            def build(command, _log_path, **_kwargs):
+                target = Path(command[3]); target.parent.mkdir(parents=True, exist_ok=True); target.write_text("binary", encoding="utf-8")
+
+            with mock.patch.object(benchmark, "REPO_ROOT", root), mock.patch.object(benchmark, "resolve_go", return_value=toolchain), mock.patch.object(
+                benchmark, "run_tee", side_effect=build
+            ) as runner, mock.patch.object(benchmark, "GO_TOOLCHAIN", None), mock.patch.object(benchmark, "BUILT_THIS_PROCESS", set()):
+                built = benchmark.ensure_binaries(run_dir, ["queries"], False)
+            self.assertEqual(runner.call_args.args[0][0], "/managed/go")
+            self.assertEqual(built[benchmark.BINARIES["queries"]]["go_toolchain"], toolchain)
+            marker = json.loads((run_dir / "results" / f"built-{benchmark.BINARIES['queries']}").read_text(encoding="utf-8"))
+            self.assertEqual(marker["go_toolchain"]["source"], "managed")
+            self.assertIn('"version": "1.21.13"', (run_dir / "logs" / "build.log").read_text(encoding="utf-8"))
+
+
 class ManagedDatabaseTests(unittest.TestCase):
     def args(self, root: Path, mode: str | None = None) -> argparse.Namespace:
         values = ["load", "--greptime-bin", "/bin/true", "--database-id", "db-a", "--database-root", str(root), "--database", "benchmark"]

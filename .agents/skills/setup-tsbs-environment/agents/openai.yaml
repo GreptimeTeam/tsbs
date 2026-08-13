@@ -1,0 +1,4 @@
+interface:
+  display_name: "Setup TSBS Environment"
+  short_description: "Install and verify the TSBS Go toolchain"
+  default_prompt: "Use $setup-tsbs-environment to prepare a verified Go toolchain for TSBS."
