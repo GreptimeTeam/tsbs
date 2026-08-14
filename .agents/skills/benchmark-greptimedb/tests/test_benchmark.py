@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 import tempfile
@@ -306,6 +307,143 @@ class QuerySetTests(unittest.TestCase):
             self.assertEqual(len(manifest["events"]["queries"]), 2)
             self.assertTrue(all(event["file_sha256"] for event in manifest["events"]["queries"]))
             self.assertEqual(manifest["dataset"]["sha256"], "d" * 64)
+
+
+class AnalyzeTests(unittest.TestCase):
+    def args(self, run_dir: Path, hot_runs: int = 2) -> argparse.Namespace:
+        return benchmark.make_parser().parse_args([
+            "analyze", "--run-dir", str(run_dir), "--database-id", "db-a",
+            "--database", "benchmark", "--profile", "smoke", "--hot-runs", str(hot_runs),
+        ])
+
+    def manifest(self, query_counts: dict[str, int]) -> dict:
+        return {
+            "schema_version": benchmark.SCHEMA_VERSION,
+            "kind": "greptimedb-run",
+            "run_id": "run",
+            "created_at": benchmark.utc_now(),
+            "profile": "smoke",
+            "database": "benchmark",
+            "workload": {"query_counts": query_counts},
+            "dataset": {"dataset_id": "data-a", "spec": {"scale": 10}},
+            "query_set": {"query_set_id": "set-a", "spec": {"query_counts": query_counts}},
+            "events": {"loads": [], "queries": [], "analyses": []},
+        }
+
+    def set_manifest(self, query_counts: dict[str, int]) -> dict:
+        return {
+            "query_set_id": "set-a",
+            "spec": {"query_counts": query_counts},
+            "files": {
+                query_type: {
+                    "path": f"queries/{query_type}.dat",
+                    "bytes": 100,
+                    "sha256": query_type.ljust(64, "0")[:64],
+                }
+                for query_type in query_counts
+            },
+        }
+
+    def execute(self, command, log_path, **_kwargs):
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("analysis completed\n", encoding="utf-8")
+        options = {part.split("=", 1)[0]: part.split("=", 1)[1] for part in command if part.startswith("--") and "=" in part}
+        result_dir = Path(options["--explain-results-dir"])
+        result_dir.mkdir(parents=True)
+        count = int(options["--max-queries"])
+        for index in range(count):
+            phase = "cold" if index == 0 else "hot"
+            name = "cold.json" if index == 0 else f"hot-{index:03d}.json"
+            sql = f"SELECT {index}"
+            benchmark.save_json(result_dir / name, {
+                "phase": phase,
+                "query_index": index,
+                "sql": sql,
+                "executed_sql": "EXPLAIN ANALYZE VERBOSE " + sql,
+                "response": {"output": [], "execution_time_ms": index},
+            })
+        benchmark.save_json(Path(options["--results-file"]), {"ResultFormatVersion": "0.2"})
+
+    def test_analyze_restarts_each_type_and_writes_attempt_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "run"; (run_dir / "logs").mkdir(parents=True); (run_dir / "results").mkdir()
+            query_counts = {"lastpoint": 3, "cpu-max-all-1": 3}
+            manifest = self.manifest(query_counts)
+            args = self.args(run_dir)
+            starts = []
+
+            @contextlib.contextmanager
+            def process(_args, _workspace, _binary, log_path):
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text("server started\n", encoding="utf-8")
+                starts.append(log_path)
+                yield "http://127.0.0.1:4000"
+
+            patches = (
+                mock.patch.object(benchmark, "generate_queries", return_value=Path(temp) / "queries"),
+                mock.patch.object(benchmark, "validate_query_set", return_value=self.set_manifest(query_counts)),
+                mock.patch.object(benchmark, "validate_query_database_binding"),
+                mock.patch.object(benchmark, "ensure_binaries"),
+                mock.patch.object(benchmark, "managed_process", side_effect=process),
+                mock.patch.object(benchmark, "run_tee", side_effect=self.execute),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5] as runner:
+                benchmark.run_analyses(args, run_dir, manifest, Path(temp), {"binding": {}}, Path("/greptime"))
+                benchmark.run_analyses(args, run_dir, manifest, Path(temp), {"binding": {}}, Path("/greptime"))
+
+            self.assertEqual(len(starts), 4)
+            self.assertEqual(runner.call_count, 4)
+            self.assertEqual([event["attempt"] for event in manifest["events"]["analyses"]], [1, 1, 2, 2])
+            for query_type in query_counts:
+                for attempt in (1, 2):
+                    result_dir = run_dir / "results/analyze" / query_type / f"run-{attempt:03d}"
+                    self.assertTrue((result_dir / "cold.json").is_file())
+                    self.assertTrue((result_dir / "hot-001.json").is_file())
+                    self.assertTrue((result_dir / "hot-002.json").is_file())
+                    self.assertTrue((result_dir / "metrics.json").is_file())
+            command = runner.call_args_list[0].args[0]
+            self.assertIn("--workers=1", command)
+            self.assertIn("--max-queries=3", command)
+            self.assertIn("--explain-analyze-verbose", command)
+
+            summary = summarize.build_summary(run_dir, manifest)
+            self.assertEqual(len(summary["analyses"]), 4)
+            self.assertFalse(summary["failures"])
+            self.assertIn("## Analysis", summarize.render_markdown(summary))
+
+    def test_analyze_rejects_insufficient_distinct_queries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "run"; (run_dir / "logs").mkdir(parents=True); (run_dir / "results").mkdir()
+            query_counts = {"lastpoint": 2}
+            manifest = self.manifest(query_counts)
+            args = self.args(run_dir)
+            with mock.patch.object(benchmark, "generate_queries", return_value=Path(temp) / "queries"), mock.patch.object(
+                benchmark, "validate_query_set", return_value=self.set_manifest(query_counts)
+            ), mock.patch.object(benchmark, "validate_query_database_binding"), mock.patch.object(
+                benchmark, "ensure_binaries"
+            ) as build:
+                with self.assertRaisesRegex(benchmark.BenchmarkError, "at least 3"):
+                    benchmark.run_analyses(args, run_dir, manifest, Path(temp), {"binding": {}}, Path("/greptime"))
+            build.assert_not_called()
+
+    def test_analyze_cli_is_managed_only_and_hot_runs_are_positive(self) -> None:
+        parser = benchmark.make_parser()
+        external = parser.parse_args(["analyze", "--endpoint", "http://localhost:4000"])
+        benchmark.resolve_database(external)
+        with self.assertRaisesRegex(benchmark.BenchmarkError, "managed"):
+            benchmark.validate_args(external)
+        invalid = parser.parse_args(["analyze", "--database-id", "db-a", "--hot-runs", "0"])
+        benchmark.resolve_database(invalid)
+        with self.assertRaisesRegex(benchmark.BenchmarkError, "positive"):
+            benchmark.validate_args(invalid)
+
+    def test_port_availability_retries_between_restarts(self) -> None:
+        with mock.patch.object(benchmark, "port_available", side_effect=[False, False, True]) as available, mock.patch.object(
+            benchmark.time, "sleep"
+        ) as sleep:
+            benchmark.check_port_available(4000)
+        self.assertEqual(available.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
 
 
 class BuildEnvironmentTests(unittest.TestCase):

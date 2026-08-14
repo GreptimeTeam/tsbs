@@ -18,10 +18,13 @@ import (
 
 // Program option vars:
 var (
-	daemonUrls []string
-	chunkSize  uint64
-	isV2       bool
-	authToken  string
+	daemonUrls            []string
+	chunkSize             uint64
+	isV2                  bool
+	authToken             string
+	explainAnalyzeVerbose bool
+	explainResultsDir     string
+	explainResults        *explainResultWriter
 )
 
 // Global vars:
@@ -39,6 +42,8 @@ func init() {
 	pflag.Uint64("chunk-response-size", 0, "Number of series to chunk results into. 0 means no chunking.")
 	pflag.Bool("is-v2", false, "Is querying InfluxDB v2. false means querying InfluxDB v1.")
 	pflag.String("auth-token", "tsbs-token", "InfluxDB v2 auth token.")
+	pflag.Bool("explain-analyze-verbose", false, "Run GreptimeDB queries with EXPLAIN ANALYZE VERBOSE.")
+	pflag.String("explain-results-dir", "", "Write GreptimeDB EXPLAIN ANALYZE VERBOSE responses to this directory.")
 
 	pflag.Parse()
 
@@ -56,6 +61,17 @@ func init() {
 	chunkSize = viper.GetUint64("chunk-response-size")
 	isV2 = viper.GetBool("is-v2")
 	authToken = viper.GetString("auth-token")
+	explainAnalyzeVerbose = viper.GetBool("explain-analyze-verbose")
+	explainResultsDir = viper.GetString("explain-results-dir")
+	if explainResultsDir != "" && !explainAnalyzeVerbose {
+		log.Fatal("--explain-results-dir requires --explain-analyze-verbose")
+	}
+	if explainAnalyzeVerbose && config.Workers != 1 {
+		log.Fatal("--explain-analyze-verbose requires --workers=1 so cold and hot query order is deterministic")
+	}
+	if explainResultsDir != "" {
+		explainResults = newExplainResultWriter(explainResultsDir)
+	}
 
 	daemonUrls = strings.Split(csvDaemonUrls, ",")
 	if len(daemonUrls) == 0 {
@@ -78,10 +94,12 @@ func newProcessor() query.Processor { return &processor{} }
 
 func (p *processor) Init(workerNumber int) {
 	p.opts = &HTTPClientDoOptions{
-		Debug:                runner.DebugLevel(),
-		PrettyPrintResponses: runner.DoPrintResponses(),
-		chunkSize:            chunkSize,
-		database:             runner.DatabaseName(),
+		Debug:                 runner.DebugLevel(),
+		PrettyPrintResponses:  runner.DoPrintResponses(),
+		chunkSize:             chunkSize,
+		database:              runner.DatabaseName(),
+		explainAnalyzeVerbose: explainAnalyzeVerbose,
+		explainResults:        explainResults,
 	}
 	url := daemonUrls[workerNumber%len(daemonUrls)]
 	p.w = NewHTTPClient(url)

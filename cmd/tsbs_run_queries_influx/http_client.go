@@ -27,12 +27,14 @@ type HTTPClient struct {
 
 // HTTPClientDoOptions wraps options uses when calling `Do`.
 type HTTPClientDoOptions struct {
-	Debug                int
-	PrettyPrintResponses bool
-	chunkSize            uint64
-	database             string
-	isV2                 bool
-	authToken            string
+	Debug                 int
+	PrettyPrintResponses  bool
+	chunkSize             uint64
+	database              string
+	isV2                  bool
+	authToken             string
+	explainAnalyzeVerbose bool
+	explainResults        *explainResultWriter
 }
 
 var httpClientOnce = sync.Once{}
@@ -61,11 +63,20 @@ func NewHTTPClient(host string) *HTTPClient {
 // Do performs the action specified by the given Query. It uses fasthttp, and
 // tries to minimize heap allocations.
 func (w *HTTPClient) Do(q *query.HTTP, opts *HTTPClientDoOptions) (lag float64, err error) {
+	executedSQL := string(q.RawQuery)
+	requestPath := q.Path
+	if opts != nil && opts.explainAnalyzeVerbose {
+		executedSQL = explainPrefix + executedSQL
+		values := url.Values{}
+		values.Set("sql", executedSQL)
+		requestPath = []byte("/v1/sql?" + values.Encode())
+	}
+
 	// populate uri from the reusable byte slice:
 	w.uri = w.uri[:0]
 	w.uri = append(w.uri, w.Host...)
 	//w.uri = append(w.uri, bytesSlash...)
-	w.uri = append(w.uri, q.Path...)
+	w.uri = append(w.uri, requestPath...)
 	w.uri = append(w.uri, []byte("&db="+url.QueryEscape(opts.database))...)
 	if opts.chunkSize > 0 {
 		s := fmt.Sprintf("&chunked=true&chunk_size=%d", opts.chunkSize)
@@ -74,10 +85,10 @@ func (w *HTTPClient) Do(q *query.HTTP, opts *HTTPClientDoOptions) (lag float64, 
 
 	// populate a request with data from the Query:
 	req, err := http.NewRequest(string(q.Method), string(w.uri), nil)
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	if err != nil {
-		panic(err)
+		return 0, err
 	}
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
 	if isV2 {
 		req.Header.Add("Authorization", "Token "+authToken)
@@ -100,7 +111,7 @@ func (w *HTTPClient) Do(q *query.HTTP, opts *HTTPClientDoOptions) (lag float64, 
 	start := time.Now()
 	resp, err := w.client.Do(req)
 	if err != nil {
-		panic(err)
+		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -112,10 +123,15 @@ func (w *HTTPClient) Do(q *query.HTTP, opts *HTTPClientDoOptions) (lag float64, 
 	body, err = ioutil.ReadAll(resp.Body)
 
 	if err != nil {
-		panic(err)
+		return 0, err
 	}
 
 	lag = float64(time.Since(start).Nanoseconds()) / 1e6 // milliseconds
+	if opts != nil && opts.explainResults != nil {
+		if err := opts.explainResults.write(q.GetID(), string(q.RawQuery), executedSQL, body); err != nil {
+			return 0, err
+		}
+	}
 
 	if opts != nil {
 		// Print debug messages, if applicable:
@@ -143,7 +159,7 @@ func (w *HTTPClient) Do(q *query.HTTP, opts *HTTPClientDoOptions) (lag float64, 
 			var v interface{}
 			var line []byte
 			full := make(map[string]interface{})
-			full["influxql"] = string(q.RawQuery)
+			full["influxql"] = executedSQL
 			json.Unmarshal(body, &v)
 			full["response"] = v
 			line, err = json.MarshalIndent(full, prefix, "  ")

@@ -91,6 +91,8 @@ def validate_run_manifest(manifest: dict[str, Any], path: Path) -> None:
     events = manifest["events"]
     if not isinstance(events, dict) or not isinstance(events.get("loads"), list) or not isinstance(events.get("queries"), list):
         raise BenchmarkError(f"malformed run events: {path}")
+    if "analyses" in events and not isinstance(events["analyses"], list):
+        raise BenchmarkError(f"malformed run events: {path}")
     workload = manifest["workload"]
     workload_fields = ("start", "end", "scale", "seed", "log_interval", "load_workers", "query_workers", "batch_size", "query_counts")
     if not all(field in workload for field in workload_fields) or not isinstance(workload["query_counts"], dict):
@@ -131,8 +133,9 @@ def prepare_run(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         manifest = {
             "schema_version": SCHEMA_VERSION, "kind": "greptimedb-run", "run_id": run_dir.name,
             "created_at": utc_now(), "profile": profile, "database": getattr(args, "database", DEFAULT_DATABASE),
-            "workload": build_workload(args), "events": {"loads": [], "queries": []},
+            "workload": build_workload(args), "events": {"loads": [], "queries": [], "analyses": []},
         }
+    manifest["events"].setdefault("analyses", [])
     if hasattr(args, "database") and manifest.get("database") != args.database and manifest_path.exists():
         raise BenchmarkError("--database conflicts with the database pinned by this run")
     save_manifest(run_dir, manifest)
@@ -501,11 +504,7 @@ def load_data(args: argparse.Namespace, run_dir: Path, manifest: dict[str, Any],
 def run_queries(args: argparse.Namespace, run_dir: Path, manifest: dict[str, Any], endpoint: str, database_manifest: dict[str, Any] | None = None) -> None:
     query_dir = generate_queries(args, run_dir, manifest); set_manifest = validate_query_set(query_dir, manifest["query_set"]["spec"])
     if database_manifest is not None:
-        binding = database_manifest.get("binding")
-        if binding is None or binding["dataset_id"] != manifest["dataset"]["dataset_id"] or binding["spec"] != manifest["dataset"]["spec"]:
-            raise BenchmarkError("managed database is not loaded with the query set's dataset")
-        manifest["dataset"].update({key: binding[key] for key in ("format", "bytes", "sha256")})
-        save_manifest(run_dir, manifest)
+        validate_query_database_binding(run_dir, manifest, database_manifest)
     ensure_binaries(run_dir, ["query"], args.rebuild); workload = manifest["workload"]
     for query_type in set_manifest["spec"]["query_counts"]:
         attempt = next_attempt(manifest["events"]["queries"], query_type); log_path = run_dir / "logs" / f"query-{query_type}-run-{attempt:03d}.log"; result_path = run_dir / "results" / f"query-{query_type}-run-{attempt:03d}.json"
@@ -519,6 +518,101 @@ def run_queries(args: argparse.Namespace, run_dir: Path, manifest: dict[str, Any
         event.update(status="completed", finished_at=utc_now(), results=relative(run_dir, result_path)); save_manifest(run_dir, manifest)
 
 
+def validate_query_database_binding(run_dir: Path, manifest: dict[str, Any], database_manifest: dict[str, Any]) -> None:
+    binding = database_manifest.get("binding")
+    dataset = manifest["dataset"]
+    if binding is None or binding["dataset_id"] != dataset["dataset_id"] or binding["spec"] != dataset["spec"]:
+        raise BenchmarkError("managed database is not loaded with the query set's dataset")
+    dataset.update({key: binding[key] for key in ("format", "bytes", "sha256")})
+    save_manifest(run_dir, manifest)
+
+
+def run_analyses(
+    args: argparse.Namespace,
+    run_dir: Path,
+    manifest: dict[str, Any],
+    workspace: Path,
+    database_manifest: dict[str, Any],
+    binary: Path,
+) -> None:
+    execution_count = 1 + args.hot_runs
+    insufficient = {
+        query_type: count
+        for query_type, count in manifest["workload"]["query_counts"].items()
+        if count < execution_count
+    }
+    if insufficient:
+        details = ", ".join(f"{query_type}={count}" for query_type, count in sorted(insufficient.items()))
+        raise BenchmarkError(
+            f"analyze requires at least {execution_count} generated queries per type; insufficient counts: {details}"
+        )
+
+    query_dir = generate_queries(args, run_dir, manifest)
+    set_manifest = validate_query_set(query_dir, manifest["query_set"]["spec"])
+    validate_query_database_binding(run_dir, manifest, database_manifest)
+    ensure_binaries(run_dir, ["query"], args.rebuild)
+
+    analyses = manifest["events"].setdefault("analyses", [])
+    endpoint = f"http://127.0.0.1:{args.http_port}"
+    for query_type in set_manifest["spec"]["query_counts"]:
+        attempt = next_attempt(analyses, query_type)
+        result_dir = run_dir / "results" / "analyze" / query_type / f"run-{attempt:03d}"
+        log_dir = run_dir / "logs" / "analyze" / query_type / f"run-{attempt:03d}"
+        runner_log = log_dir / "runner.log"
+        process_log = log_dir / "greptimedb.log"
+        metrics_path = result_dir / "metrics.json"
+        cold_path = result_dir / "cold.json"
+        hot_paths = [result_dir / f"hot-{index:03d}.json" for index in range(1, execution_count)]
+        metadata = set_manifest["files"][query_type]
+        event = {
+            "query_type": query_type,
+            "attempt": attempt,
+            "database": args.database,
+            "query_set_id": set_manifest["query_set_id"],
+            "file": metadata["path"],
+            "file_bytes": metadata["bytes"],
+            "file_sha256": metadata["sha256"],
+            "cold_query_index": 0,
+            "hot_query_indices": list(range(1, execution_count)),
+            "hot_runs": args.hot_runs,
+            "result_dir": relative(run_dir, result_dir),
+            "cold_result": relative(run_dir, cold_path),
+            "hot_results": [relative(run_dir, path) for path in hot_paths],
+            "metrics": relative(run_dir, metrics_path),
+            "log": relative(run_dir, runner_log),
+            "server_log": relative(run_dir, process_log),
+            "status": "running",
+            "started_at": utc_now(),
+        }
+        analyses.append(event)
+        save_manifest(run_dir, manifest)
+        command = [
+            str(REPO_ROOT / "bin" / BINARIES["query"]),
+            f"--file={query_file_path(query_dir, query_type)}",
+            f"--db-name={args.database}",
+            f"--urls={endpoint}",
+            "--workers=1",
+            f"--max-queries={execution_count}",
+            "--print-interval=0",
+            "--explain-analyze-verbose",
+            f"--explain-results-dir={result_dir}",
+            f"--results-file={metrics_path}",
+        ]
+        try:
+            with managed_process(args, workspace, binary, process_log):
+                run_tee(command, runner_log)
+            expected = [cold_path, *hot_paths, metrics_path]
+            missing = [path for path in expected if not path.is_file()]
+            if missing:
+                raise BenchmarkError("analyze command did not produce expected results: " + ", ".join(map(str, missing)))
+        except Exception as exc:
+            event.update(status="failed", reason=str(exc), finished_at=utc_now())
+            save_manifest(run_dir, manifest)
+            raise
+        event.update(status="completed", finished_at=utc_now())
+        save_manifest(run_dir, manifest)
+
+
 def endpoint_ready(endpoint: str) -> bool:
     data = urllib.parse.urlencode({"sql": "SHOW DATABASES"}).encode(); request = urllib.request.Request(endpoint.rstrip("/") + "/v1/sql", data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
     try:
@@ -526,10 +620,72 @@ def endpoint_ready(endpoint: str) -> bool:
     except (OSError, urllib.error.URLError): return False
 
 
-def check_port_available(port: int) -> None:
+def port_available(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        try: sock.bind(("127.0.0.1", port))
-        except OSError as exc: raise BenchmarkError(f"managed GreptimeDB HTTP port {port} is unavailable") from exc
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def check_port_available(port: int, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not port_available(port):
+        if time.monotonic() >= deadline:
+            raise BenchmarkError(f"managed GreptimeDB HTTP port {port} is unavailable")
+        time.sleep(0.1)
+
+
+@contextlib.contextmanager
+def managed_workspace(
+    args: argparse.Namespace,
+    existing_target: dict[str, Any] | None = None,
+) -> Iterator[tuple[Path, dict[str, Any], Path, dict[str, Any]]]:
+    workspace, database_manifest = prepare_database_workspace(args)
+    with lock_database(workspace):
+        binary = managed_binary(args, database_manifest)
+        target = managed_target(args, database_manifest, binary)
+        if existing_target and not target_matches(existing_target, target):
+            raise BenchmarkError("run target is immutable; create a new run for another GreptimeDB version or target")
+        if not binary.is_file() or not os.access(binary, os.X_OK): raise BenchmarkError(f"GreptimeDB binary is not executable: {binary}")
+        yield workspace, database_manifest, binary, target
+
+
+@contextlib.contextmanager
+def managed_process(args: argparse.Namespace, workspace: Path, binary: Path, process_log_path: Path) -> Iterator[str]:
+    process_log_path.parent.mkdir(parents=True, exist_ok=True)
+    process_log = process_log_path.open("a", encoding="utf-8")
+    try:
+        check_port_available(args.http_port)
+    except Exception as exc:
+        process_log.write(f"{exc}\n")
+        process_log.close()
+        raise
+    endpoint = f"http://127.0.0.1:{args.http_port}"
+    command = [str(binary), "standalone", "start", "--http-addr", f"127.0.0.1:{args.http_port}", "--influxdb-enable", "--data-home", str(workspace / "data"), "--log-dir", str(workspace / "logs")]
+    process_log.write(f"$ {display_command(command)}\n")
+    process_log.flush()
+    try:
+        process = subprocess.Popen(command, cwd=workspace, stdout=process_log, stderr=subprocess.STDOUT, start_new_session=True)
+    except Exception:
+        process_log.close()
+        raise
+    try:
+        deadline = time.monotonic() + args.startup_timeout
+        while time.monotonic() < deadline:
+            if process.poll() is not None: raise BenchmarkError(f"GreptimeDB exited during startup; see {process_log_path}")
+            if endpoint_ready(endpoint): break
+            time.sleep(0.5)
+        else: raise BenchmarkError(f"GreptimeDB was not ready within {args.startup_timeout}s; see {process_log_path}")
+        yield endpoint
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try: process.wait(timeout=15)
+            except subprocess.TimeoutExpired: os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=5)
+        process_log.close()
 
 
 @contextlib.contextmanager
@@ -540,30 +696,9 @@ def connection(args: argparse.Namespace, run_dir: Path, existing_target: dict[st
         if existing_target and not target_matches(existing_target, target):
             raise BenchmarkError("run target is immutable; create a new run for another GreptimeDB version or target")
         yield endpoint, False, None, None, target; return
-    workspace, database_manifest = prepare_database_workspace(args)
-    with lock_database(workspace):
-        binary = managed_binary(args, database_manifest)
-        target = managed_target(args, database_manifest, binary)
-        if existing_target and not target_matches(existing_target, target):
-            raise BenchmarkError("run target is immutable; create a new run for another GreptimeDB version or target")
-        if not binary.is_file() or not os.access(binary, os.X_OK): raise BenchmarkError(f"GreptimeDB binary is not executable: {binary}")
-        check_port_available(args.http_port); endpoint = f"http://127.0.0.1:{args.http_port}"; process_log_path = run_dir / "logs" / "greptimedb-process.log"; process_log = process_log_path.open("a", encoding="utf-8")
-        command = [str(binary), "standalone", "start", "--http-addr", f"127.0.0.1:{args.http_port}", "--influxdb-enable", "--data-home", str(workspace / "data"), "--log-dir", str(workspace / "logs")]
-        process_log.write(f"$ {display_command(command)}\n"); process_log.flush(); process = subprocess.Popen(command, cwd=workspace, stdout=process_log, stderr=subprocess.STDOUT, start_new_session=True)
-        try:
-            deadline = time.monotonic() + args.startup_timeout
-            while time.monotonic() < deadline:
-                if process.poll() is not None: raise BenchmarkError(f"GreptimeDB exited during startup; see {process_log_path}")
-                if endpoint_ready(endpoint): break
-                time.sleep(0.5)
-            else: raise BenchmarkError(f"GreptimeDB was not ready within {args.startup_timeout}s; see {process_log_path}")
+    with managed_workspace(args, existing_target) as (workspace, database_manifest, binary, target):
+        with managed_process(args, workspace, binary, run_dir / "logs" / "greptimedb-process.log") as endpoint:
             yield endpoint, True, database_manifest, workspace, target
-        finally:
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGTERM)
-                try: process.wait(timeout=15)
-                except subprocess.TimeoutExpired: os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=5)
-            process_log.close()
 
 
 def add_run_options(parser: argparse.ArgumentParser) -> None:
@@ -595,6 +730,7 @@ def make_parser() -> argparse.ArgumentParser:
     generate = subparsers.add_parser("generate"); add_run_options(generate); generate.add_argument("--only", choices=("all", "data", "queries"), default="all")
     load = subparsers.add_parser("load"); add_run_options(load); add_connection_options(load); add_load_options(load)
     query = subparsers.add_parser("query"); add_run_options(query); add_connection_options(query); add_version_override_options(query)
+    analyze = subparsers.add_parser("analyze"); add_run_options(analyze); add_connection_options(analyze); add_version_override_options(analyze); analyze.add_argument("--hot-runs", type=int, default=2, help="number of generated queries to analyze after the cold query (default: 2)")
     all_command = subparsers.add_parser("all"); add_run_options(all_command); add_connection_options(all_command); add_load_options(all_command)
     summarize = subparsers.add_parser("summarize"); summarize.add_argument("--run-dir", required=True, type=Path)
     compare = subparsers.add_parser("compare"); compare.add_argument("--baseline-run", required=True, type=Path); compare.add_argument("--candidate-run", required=True, action="append", type=Path); compare.add_argument("--comparison-root", type=Path)
@@ -602,7 +738,7 @@ def make_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    for name in ("scale", "load_workers", "query_workers", "batch_size", "queries"):
+    for name in ("scale", "load_workers", "query_workers", "batch_size", "queries", "hot_runs"):
         value = getattr(args, name, None)
         if value is not None and value <= 0: raise BenchmarkError(f"--{name.replace('_', '-')} must be positive")
     try:
@@ -615,7 +751,7 @@ def validate_args(args: argparse.Namespace) -> None:
     for name in ("dataset_id", "database_id"):
         value = getattr(args, name, None)
         if value and not ID_RE.fullmatch(value): raise BenchmarkError(f"--{name.replace('_', '-')} contains invalid characters")
-    if args.command in ("load", "query", "all"):
+    if args.command in ("load", "query", "analyze", "all"):
         greptime_version = getattr(args, "greptime_version", None)
         if args.endpoint and (args.greptime_bin or args.database_id or greptime_version): raise BenchmarkError("external GreptimeDB cannot use managed binary or database options")
         if not args.endpoint and not args.database_id: raise BenchmarkError("provide --database-id for managed GreptimeDB or --endpoint for external GreptimeDB")
@@ -626,6 +762,8 @@ def validate_args(args: argparse.Namespace) -> None:
         if args.endpoint:
             parsed = urllib.parse.urlparse(args.endpoint)
             if parsed.scheme not in ("http", "https") or not parsed.netloc: raise BenchmarkError("--endpoint must be an absolute HTTP or HTTPS URL")
+    if args.command == "analyze" and args.endpoint:
+        raise BenchmarkError("analyze requires a managed GreptimeDB workspace; external endpoints cannot be restarted")
     if args.command in ("load", "all"):
         if args.endpoint and args.database_mode is None: raise BenchmarkError("external loads require --database-mode=create|reuse|reset")
         if args.database_mode == "reset" and args.confirm_reset != args.database: raise BenchmarkError("reset requires --confirm-reset to exactly match --database")
@@ -651,6 +789,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manifest["target"] = target; save_manifest(run_dir, manifest)
                 if args.command in ("load", "all"): load_data(args, run_dir, manifest, endpoint, managed, database_manifest, database_path)
                 if args.command in ("query", "all"): run_queries(args, run_dir, manifest, endpoint, database_manifest)
+        elif args.command == "analyze":
+            with managed_workspace(args, manifest.get("target")) as (workspace, database_manifest, binary, target):
+                manifest["target"] = target; save_manifest(run_dir, manifest)
+                run_analyses(args, run_dir, manifest, workspace, database_manifest, binary)
         summary = write_summary(run_dir, manifest); print(f"Run directory: {run_dir}"); print(f"Summary: {run_dir / 'summary.md'}"); return 1 if summary["failures"] else 0
     except (BenchmarkError, ComparisonError, TsbsEnvironmentError, OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
         if run_dir is not None and manifest is not None:

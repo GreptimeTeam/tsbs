@@ -11,7 +11,11 @@
 └── greptimedb/
     ├── installations/<version>/<platform>/{manifest.json,greptime,...}
     ├── databases/<database-id>/{manifest.json,data/,logs/}
-    ├── runs/<run-id>/{manifest.json,logs/,results/,summary.json,summary.md}
+    ├── runs/<run-id>/
+    │   ├── manifest.json
+    │   ├── summary.{json,md}
+    │   ├── results/analyze/<query-type>/run-NNN/{cold.json,hot-NNN.json,metrics.json}
+    │   └── logs/analyze/<query-type>/run-NNN/{runner.log,greptimedb.log}
     └── comparisons/<comparison-id>/{manifest.json,summary.json,summary.md}
 ```
 
@@ -36,6 +40,21 @@ use case `devops`, Influx line protocol data, and Greptime query format.
 | Batch size | 3000 | 3000 |
 
 The query generator receives the end timestamp plus one second.
+
+## Explain analysis
+
+Analysis is managed-only. For each selected query type, the runner restarts
+GreptimeDB and executes query index `0` as the cold `EXPLAIN ANALYZE VERBOSE`
+request. It then executes generated query indices `1..N` as hot requests without
+another restart. Predicate-based types vary their SQL; invariant types such as
+`lastpoint` repeat the same SQL. `N` defaults to two and is configurable with
+`--hot-runs`. The selected query-set count for every type must be at least
+`N + 1`.
+
+Each response artifact preserves the original SQL, executed explain SQL, phase,
+query index, and complete GreptimeDB HTTP JSON response. Attempts are immutable:
+repeating a type in one run creates `run-002`, then `run-003`, and so on. A
+process restart does not clear the operating-system filesystem cache.
 
 ## Query counts
 
