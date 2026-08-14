@@ -66,6 +66,11 @@ ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
 DATA_WORKLOAD_OPTIONS = ("start", "end", "scale", "seed", "log_interval")
 BINARIES = {"queries": "tsbs_generate_queries", "load": "tsbs_load_greptime", "query": "tsbs_run_queries_influx"}
+BINARY_BUILD_VERSIONS = {
+    "tsbs_generate_queries": 1,
+    "tsbs_load_greptime": 1,
+    "tsbs_run_queries_influx": 2,
+}
 BUILT_THIS_PROCESS: set[str] = set()
 GO_TOOLCHAIN: dict[str, Any] | None = None
 
@@ -175,7 +180,15 @@ def run_tee(command: Sequence[str], log_path: Path, *, stdout_path: Path | None 
 
 def binary_needs_build(run_dir: Path, name: str, target: Path, rebuild: bool) -> bool:
     marker = run_dir / "results" / f"built-{name}"
-    return name not in BUILT_THIS_PROCESS and (rebuild or not (target.exists() and marker.exists()))
+    if name in BUILT_THIS_PROCESS:
+        return False
+    if rebuild or not target.exists() or not marker.exists():
+        return True
+    try:
+        metadata = read_json(marker)
+    except BenchmarkError:
+        return True
+    return metadata.get("build_version", 1) != BINARY_BUILD_VERSIONS[name]
 
 
 def ensure_binaries(run_dir: Path, stages: Sequence[str], rebuild: bool) -> dict[str, dict[str, Any]]:
@@ -194,7 +207,7 @@ def ensure_binaries(run_dir: Path, stages: Sequence[str], rebuild: bool) -> dict
         with build_log.open("a", encoding="utf-8") as log:
             log.write(f"# Go toolchain: {json.dumps(GO_TOOLCHAIN, sort_keys=True)}\n")
         run_tee([GO_TOOLCHAIN["binary"], "build", "-o", str(target), f"./cmd/{name}"], build_log, append=True)
-        metadata = {"binary": f"bin/{name}", "binary_sha256": sha256_file(target), "built_at": utc_now(), "go_toolchain": GO_TOOLCHAIN}
+        metadata = {"binary": f"bin/{name}", "binary_sha256": sha256_file(target), "build_version": BINARY_BUILD_VERSIONS[name], "built_at": utc_now(), "go_toolchain": GO_TOOLCHAIN}
         save_json(marker, metadata); built[name] = metadata; BUILT_THIS_PROCESS.add(name)
     return built
 

@@ -63,11 +63,8 @@ func init() {
 	authToken = viper.GetString("auth-token")
 	explainAnalyzeVerbose = viper.GetBool("explain-analyze-verbose")
 	explainResultsDir = viper.GetString("explain-results-dir")
-	if explainResultsDir != "" && !explainAnalyzeVerbose {
-		log.Fatal("--explain-results-dir requires --explain-analyze-verbose")
-	}
-	if explainAnalyzeVerbose && config.Workers != 1 {
-		log.Fatal("--explain-analyze-verbose requires --workers=1 so cold and hot query order is deterministic")
+	if err := validateExplainOptions(config, explainAnalyzeVerbose, explainResultsDir); err != nil {
+		log.Fatal(err)
 	}
 	if explainResultsDir != "" {
 		explainResults = newExplainResultWriter(explainResultsDir)
@@ -79,6 +76,19 @@ func init() {
 	}
 
 	runner = query.NewBenchmarkRunner(config)
+}
+
+func validateExplainOptions(config query.BenchmarkRunnerConfig, explain bool, resultsDir string) error {
+	if resultsDir != "" && !explain {
+		return fmt.Errorf("--explain-results-dir requires --explain-analyze-verbose")
+	}
+	if resultsDir != "" && config.PrewarmQueries {
+		return fmt.Errorf("--explain-results-dir cannot be combined with --prewarm-queries")
+	}
+	if explain && config.Workers != 1 {
+		return fmt.Errorf("--explain-analyze-verbose requires --workers=1 so cold and hot query order is deterministic")
+	}
+	return nil
 }
 
 func main() {

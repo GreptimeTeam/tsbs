@@ -464,7 +464,69 @@ class BuildEnvironmentTests(unittest.TestCase):
             self.assertEqual(built[benchmark.BINARIES["queries"]]["go_toolchain"], toolchain)
             marker = json.loads((run_dir / "results" / f"built-{benchmark.BINARIES['queries']}").read_text(encoding="utf-8"))
             self.assertEqual(marker["go_toolchain"]["source"], "managed")
+            self.assertEqual(marker["build_version"], 1)
             self.assertIn('"version": "1.21.13"', (run_dir / "logs" / "build.log").read_text(encoding="utf-8"))
+
+    def test_legacy_query_runner_marker_forces_feature_build(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); run_dir = root / "run"
+            (run_dir / "results").mkdir(parents=True); (run_dir / "logs").mkdir()
+            name = benchmark.BINARIES["query"]
+            target = root / "bin" / name
+            target.parent.mkdir(parents=True); target.write_text("legacy", encoding="utf-8")
+            benchmark.save_json(run_dir / "results" / f"built-{name}", {"binary": f"bin/{name}"})
+            toolchain = {"source": "managed", "version": "1.21.13", "binary": "/managed/go", "binary_sha256": "a" * 64}
+
+            def build(command, _log_path, **_kwargs):
+                Path(command[3]).write_text("feature-capable", encoding="utf-8")
+
+            with mock.patch.object(benchmark, "REPO_ROOT", root), mock.patch.object(benchmark, "resolve_go", return_value=toolchain), mock.patch.object(
+                benchmark, "run_tee", side_effect=build
+            ) as runner, mock.patch.object(benchmark, "GO_TOOLCHAIN", None), mock.patch.object(benchmark, "BUILT_THIS_PROCESS", set()):
+                benchmark.ensure_binaries(run_dir, ["query"], False)
+
+            runner.assert_called_once()
+            marker = json.loads((run_dir / "results" / f"built-{name}").read_text(encoding="utf-8"))
+            self.assertEqual(marker["build_version"], 2)
+
+    def test_current_query_runner_marker_reuses_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); run_dir = root / "run"
+            (run_dir / "results").mkdir(parents=True)
+            name = benchmark.BINARIES["query"]
+            target = root / "bin" / name
+            target.parent.mkdir(parents=True); target.write_text("feature-capable", encoding="utf-8")
+            benchmark.save_json(
+                run_dir / "results" / f"built-{name}",
+                {"binary": f"bin/{name}", "build_version": benchmark.BINARY_BUILD_VERSIONS[name]},
+            )
+
+            with mock.patch.object(benchmark, "REPO_ROOT", root), mock.patch.object(benchmark, "resolve_go") as resolve, mock.patch.object(
+                benchmark, "run_tee"
+            ) as runner, mock.patch.object(benchmark, "BUILT_THIS_PROCESS", set()):
+                built = benchmark.ensure_binaries(run_dir, ["query"], False)
+
+            self.assertEqual(built, {})
+            resolve.assert_not_called()
+            runner.assert_not_called()
+
+    def test_legacy_marker_reuses_unchanged_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); run_dir = root / "run"
+            (run_dir / "results").mkdir(parents=True)
+            name = benchmark.BINARIES["queries"]
+            target = root / "bin" / name
+            target.parent.mkdir(parents=True); target.write_text("binary", encoding="utf-8")
+            benchmark.save_json(run_dir / "results" / f"built-{name}", {"binary": f"bin/{name}"})
+
+            with mock.patch.object(benchmark, "REPO_ROOT", root), mock.patch.object(benchmark, "resolve_go") as resolve, mock.patch.object(
+                benchmark, "run_tee"
+            ) as runner, mock.patch.object(benchmark, "BUILT_THIS_PROCESS", set()):
+                built = benchmark.ensure_binaries(run_dir, ["queries"], False)
+
+            self.assertEqual(built, {})
+            resolve.assert_not_called()
+            runner.assert_not_called()
 
 
 class ManagedDatabaseTests(unittest.TestCase):
