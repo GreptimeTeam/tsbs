@@ -622,7 +622,7 @@ def add_run_options(parser: argparse.ArgumentParser) -> None:
 
 
 def add_connection_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--database-id"); parser.add_argument("--database-root", type=Path); parser.add_argument("--url", action="append"); parser.add_argument("--edition", choices=("core", "enterprise")); parser.add_argument("--http-port", type=int, default=8181); parser.add_argument("--startup-timeout", type=int, default=60); parser.add_argument("--shutdown-timeout", type=int, default=60, help="seconds to wait for a managed server to flush and stop"); parser.add_argument("--database", help=f"SQL database name (default: {DEFAULT_DATABASE})"); parser.add_argument("--auth-token-env", default="INFLUXDB3_AUTH_TOKEN"); parser.add_argument("--admin-token-env", default="INFLUXDB3_ADMIN_TOKEN")
+    parser.add_argument("--database-id"); parser.add_argument("--database-root", type=Path); parser.add_argument("--url", action="append"); parser.add_argument("--edition", choices=("core", "enterprise")); parser.add_argument("--http-port", type=int, default=8181); parser.add_argument("--startup-timeout", type=int, default=600, help="seconds to wait for a managed server to become ready"); parser.add_argument("--shutdown-timeout", type=int, default=60, help="seconds to wait for a managed server to flush and stop"); parser.add_argument("--database", help=f"SQL database name (default: {DEFAULT_DATABASE})"); parser.add_argument("--auth-token-env", default="INFLUXDB3_AUTH_TOKEN"); parser.add_argument("--admin-token-env", default="INFLUXDB3_ADMIN_TOKEN")
 
 
 def add_load_options(parser: argparse.ArgumentParser) -> None:
