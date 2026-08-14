@@ -1,4 +1,4 @@
 interface:
   display_name: "Benchmark GreptimeDB"
-  short_description: "Run reusable GreptimeDB TSBS benchmarks"
-  default_prompt: "Use $benchmark-greptimedb to run a shared-workspace TSBS benchmark against GreptimeDB and summarize the results."
+  short_description: "Benchmark and analyze GreptimeDB TSBS queries"
+  default_prompt: "Use $benchmark-greptimedb to run a shared-workspace TSBS benchmark or collect cold and hot EXPLAIN ANALYZE VERBOSE results against GreptimeDB, then summarize the results."

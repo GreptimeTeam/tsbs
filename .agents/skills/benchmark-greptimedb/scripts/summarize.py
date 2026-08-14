@@ -15,12 +15,73 @@ sys.path.insert(0, str(SCRIPT_PATH.parents[3] / "lib"))
 
 from tsbs_benchmark import (  # noqa: E402
     SummaryError,
-    build_summary,
+    build_summary as build_benchmark_summary,
     parse_load_log,
     parse_load_result,
     parse_query_log,
     parse_query_result,
 )
+
+
+def _validate_analysis_result(run_dir: Path, relative_path: str, phase: str, query_index: int) -> None:
+    path = run_dir / relative_path
+    try:
+        result = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SummaryError(f"malformed analysis result JSON {relative_path}: {exc}") from exc
+    if not isinstance(result, dict):
+        raise SummaryError(f"analysis result must be an object: {relative_path}")
+    required = {"phase", "query_index", "sql", "executed_sql", "response"}
+    if not required.issubset(result):
+        raise SummaryError(f"analysis result is missing required fields: {relative_path}")
+    if result["phase"] != phase or result["query_index"] != query_index:
+        raise SummaryError(f"analysis result phase or query index mismatch: {relative_path}")
+    if not isinstance(result["sql"], str) or not isinstance(result["executed_sql"], str):
+        raise SummaryError(f"analysis result SQL fields must be strings: {relative_path}")
+    if result["executed_sql"] != "EXPLAIN ANALYZE VERBOSE " + result["sql"]:
+        raise SummaryError(f"analysis result executed SQL mismatch: {relative_path}")
+    if not isinstance(result["response"], dict):
+        raise SummaryError(f"analysis response must be an object: {relative_path}")
+
+
+def build_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    summary = build_benchmark_summary(run_dir, manifest)
+    analyses: list[dict[str, Any]] = []
+    for event in manifest.get("events", {}).get("analyses", []):
+        base = {
+            "query_type": event["query_type"],
+            "attempt": event["attempt"],
+            "database": event["database"],
+            "hot_runs": event["hot_runs"],
+            "cold_query_index": event["cold_query_index"],
+            "hot_query_indices": event["hot_query_indices"],
+            "result_dir": event["result_dir"],
+            "cold_result": event["cold_result"],
+            "hot_results": event["hot_results"],
+            "metrics": event["metrics"],
+            "log": event["log"],
+            "server_log": event["server_log"],
+        }
+        if event.get("status") != "completed":
+            failure_log = event["log"] if (run_dir / event["log"]).is_file() else event["server_log"]
+            summary["failures"].append(
+                {"stage": "analyze", "log": failure_log, "reason": event.get("reason", event.get("status", "failed"))}
+            )
+            continue
+        try:
+            _validate_analysis_result(run_dir, event["cold_result"], "cold", event["cold_query_index"])
+            if len(event["hot_results"]) != len(event["hot_query_indices"]):
+                raise SummaryError(f"analysis hot result count mismatch: {event['result_dir']}")
+            for result_path, query_index in zip(event["hot_results"], event["hot_query_indices"]):
+                _validate_analysis_result(run_dir, result_path, "hot", query_index)
+            for artifact in (event["metrics"], event["log"], event["server_log"]):
+                if not (run_dir / artifact).is_file():
+                    raise SummaryError(f"missing analysis artifact: {artifact}")
+            analyses.append(base)
+        except (OSError, SummaryError) as exc:
+            summary["failures"].append({"stage": "analyze", "log": event["log"], "reason": str(exc)})
+    summary["analyses"] = analyses
+    return summary
 
 
 def render_markdown(summary: dict[str, Any]) -> str:
@@ -99,6 +160,24 @@ def render_markdown(summary: dict[str, Any]) -> str:
             )
     else:
         lines.append("No completed query runs.")
+
+    lines.extend(["", "## Analysis", ""])
+    if summary.get("analyses"):
+        lines.extend(
+            [
+                "| Database | Query type | Attempt | Cold query | Hot queries | Results | Runner log | Server log |",
+                "| --- | --- | ---: | ---: | --- | --- | --- | --- |",
+            ]
+        )
+        for analysis in summary["analyses"]:
+            hot_queries = ", ".join(str(index) for index in analysis["hot_query_indices"])
+            lines.append(
+                f"| `{analysis['database']}` | `{analysis['query_type']}` | {analysis['attempt']} | "
+                f"{analysis['cold_query_index']} | {hot_queries} | `{analysis['result_dir']}` | "
+                f"`{analysis['log']}` | `{analysis['server_log']}` |"
+            )
+    else:
+        lines.append("No completed analysis runs.")
 
     if summary["failures"]:
         lines.extend(
