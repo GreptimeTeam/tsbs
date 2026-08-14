@@ -378,6 +378,7 @@ class TargetTests(unittest.TestCase):
             "load", "--database-id", "db-a", "--no-sync",
         ])
         self.assertFalse(durable.no_sync)
+        self.assertEqual(durable.startup_timeout, 600)
         self.assertEqual(durable.shutdown_timeout, 60)
         self.assertTrue(non_durable.no_sync)
 
