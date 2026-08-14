@@ -38,6 +38,13 @@ The query generator receives the end timestamp plus one second.
 
 ## Query counts
 
+Profile counts are defaults. `--queries=N` replaces the default for every
+selected type, and repeatable `--query-count TYPE=N` entries take final
+precedence for individual types. If `--query-count` is used without
+`--query-type`, only the named types belong to the query set. If
+`--query-type` is present, it defines membership and every per-type override
+must target one of those types.
+
 | Query type | Manual | Smoke |
 | --- | ---: | ---: |
 | `cpu-max-all-1` | 100 | 10 |

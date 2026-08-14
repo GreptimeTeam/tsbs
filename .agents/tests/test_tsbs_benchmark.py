@@ -49,6 +49,7 @@ class WorkloadTests(unittest.TestCase):
             "batch_size": None,
             "queries": None,
             "query_type": None,
+            "query_count": None,
         }
         values.update(overrides)
         return argparse.Namespace(**values)
@@ -70,6 +71,67 @@ class WorkloadTests(unittest.TestCase):
 
         self.assertEqual(workload["scale"], 7)
         self.assertEqual(workload["start"], base["start"])
+
+    def test_per_type_counts_define_a_subset(self) -> None:
+        workload = shared.build_workload(
+            self.args(
+                query_count=[("lastpoint", 7), ("cpu-max-all-1", 23)]
+            )
+        )
+
+        self.assertEqual(
+            workload["query_counts"], {"cpu-max-all-1": 23, "lastpoint": 7}
+        )
+
+    def test_per_type_counts_override_global_and_profile_counts(self) -> None:
+        workload = shared.build_workload(
+            self.args(
+                query_type=[
+                    "lastpoint",
+                    "cpu-max-all-1",
+                    "double-groupby-1",
+                ],
+                queries=20,
+                query_count=[("lastpoint", 7), ("cpu-max-all-1", 23)],
+            )
+        )
+
+        self.assertEqual(
+            workload["query_counts"],
+            {
+                "cpu-max-all-1": 23,
+                "double-groupby-1": 20,
+                "lastpoint": 7,
+            },
+        )
+
+    def test_per_type_count_must_match_explicit_membership(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not selected"):
+            shared.build_workload(
+                self.args(
+                    query_type=["lastpoint"],
+                    query_count=[("cpu-max-all-1", 23)],
+                )
+            )
+
+    def test_duplicate_per_type_count_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicate --query-count"):
+            shared.build_workload(
+                self.args(query_count=[("lastpoint", 7), ("lastpoint", 8)])
+            )
+
+    def test_query_count_parser_rejects_invalid_values(self) -> None:
+        invalid = (
+            "lastpoint",
+            "unknown=10",
+            "lastpoint=abc",
+            "lastpoint=0",
+            "lastpoint=-1",
+        )
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    shared.parse_query_count(value)
 
 
 class ResultTests(unittest.TestCase):

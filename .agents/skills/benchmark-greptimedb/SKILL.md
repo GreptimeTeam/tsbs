@@ -39,16 +39,19 @@ python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py generate \
 
 python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py query \
   --profile smoke --endpoint http://127.0.0.1:4000 --database benchmark \
-  --query-type cpu-max-all-1 --query-type lastpoint
+  --query-count cpu-max-all-1=100 --query-count lastpoint=10
 
 python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py summarize \
   --run-dir .benchmarks/greptimedb/runs/RUN_ID
 ```
 
 Repeat `--query-type` to define query-set membership; omit it for every
-supported type. `--queries=N` assigns that count to every selected type and
-therefore selects a different immutable query set. Each selected query file is
-executed once. Start another run to make another measurement.
+supported type. `--queries=N` assigns a default count to every selected type.
+Repeat `--query-count TYPE=N` to override individual counts; without
+`--query-type`, those entries also define membership. With both flags, every
+per-type override must name a selected type. Resolved counts are part of the
+immutable query-set identity. Each selected query file is executed once. Start
+another run to make another measurement.
 
 Query-only commands prepare logical dataset metadata without generating data.
 Use `--dataset-id` or `--dataset-path` to pin a dataset. Shared query sets live

@@ -42,16 +42,20 @@ python3 .agents/skills/benchmark-influxdb3/scripts/benchmark.py all \
 
 python3 .agents/skills/benchmark-influxdb3/scripts/benchmark.py query \
   --profile smoke --url http://127.0.0.1:8181 --edition core \
-  --query-type cpu-max-all-1 --query-type lastpoint
+  --query-count cpu-max-all-1=100 --query-count lastpoint=10
 
 python3 .agents/skills/benchmark-influxdb3/scripts/benchmark.py summarize \
   --run-dir .benchmarks/influxdb3/runs/RUN_ID
 ```
 
 Repeat `--query-type` to define membership; omit it for every supported type.
-Each immutable query file executes once per run. Query-only commands prepare
-logical dataset metadata without generating data. Shared query sets are reused
-only after exact manifest, membership, size, and checksum validation.
+`--queries=N` supplies a default count for selected types, while repeatable
+`--query-count TYPE=N` entries override individual counts. Without
+`--query-type`, per-type entries define membership; with it, overrides must
+name selected types. Each immutable query file executes once per run.
+Query-only commands prepare logical dataset metadata without generating data.
+Shared query sets are reused only after exact manifest, membership, size, and
+checksum validation.
 Managed servers may take several minutes to initialize, so the runner waits up
 to 10 minutes by default. Override this with `--startup-timeout SECONDS` when a
 different allowance is required.

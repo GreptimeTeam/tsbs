@@ -31,6 +31,12 @@ Both use seed `123`, interval `10s`, `cpu-only` data, `devops` queries,
 durable WAL acknowledgement, and rejection of partial batches. The query end
 timestamp is the dataset end plus one second.
 
+Profile query counts are defaults. `--queries=N` replaces the default for
+every selected type, and repeatable `--query-count TYPE=N` entries override
+individual counts. Without `--query-type`, per-type entries define query-set
+membership; with `--query-type`, every override must target a selected type.
+The resolved type-to-count mapping is part of the immutable query-set identity.
+
 The manual load settings are InfluxDB-specific overrides selected by
 `docs/influx3-ingestion-benchmark.md`; shared TSBS and GreptimeDB profile
 defaults remain unchanged. Explicit `--load-workers` and `--batch-size` flags

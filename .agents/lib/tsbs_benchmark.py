@@ -149,6 +149,38 @@ def add_one_second(timestamp: str) -> str:
     return (parsed + dt.timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
 
 
+def parse_query_count(value: str) -> tuple[str, int]:
+    query_type, separator, raw_count = value.partition("=")
+    if not separator or not query_type or not raw_count:
+        raise argparse.ArgumentTypeError(
+            "query count must use QUERY_TYPE=COUNT syntax"
+        )
+    if query_type not in QUERY_TYPES:
+        raise argparse.ArgumentTypeError(f"unsupported query type: {query_type}")
+    try:
+        count = int(raw_count)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"query count for {query_type} must be an integer"
+        ) from exc
+    if count <= 0:
+        raise argparse.ArgumentTypeError(
+            f"query count for {query_type} must be positive"
+        )
+    return query_type, count
+
+
+def query_count_overrides(
+    values: Sequence[tuple[str, int]] | None,
+) -> dict[str, int]:
+    overrides: dict[str, int] = {}
+    for query_type, count in values or ():
+        if query_type in overrides:
+            raise ValueError(f"duplicate --query-count for {query_type}")
+        overrides[query_type] = count
+    return overrides
+
+
 def build_workload(
     args: argparse.Namespace,
     base: dict[str, Any] | None = None,
@@ -173,10 +205,24 @@ def build_workload(
         value = getattr(args, attr, None)
         if value is not None:
             workload[attr] = value
-    selected = sorted(set(args.query_type or workload["query_counts"]))
+    overrides = query_count_overrides(getattr(args, "query_count", None))
+    if args.query_type:
+        selected = sorted(set(args.query_type))
+        unselected = sorted(set(overrides) - set(selected))
+        if unselected:
+            raise ValueError(
+                "--query-count targets query types not selected by --query-type: "
+                + ", ".join(unselected)
+            )
+    elif overrides:
+        selected = sorted(overrides)
+    else:
+        selected = sorted(workload["query_counts"])
     count_override = getattr(args, "queries", None)
     workload["query_counts"] = {
-        query_type: count_override
+        query_type: overrides[query_type]
+        if query_type in overrides
+        else count_override
         if count_override is not None
         else workload["query_counts"][query_type]
         for query_type in selected
