@@ -38,7 +38,9 @@ The generator validates format names. GreptimeDB and InfluxDB 3 consume the
 `influx` variant; other loaders should request their native TSBS format under
 the same logical dataset ID.
 
-- Validate the logical manifest and artifact size/checksum before reuse.
+- Validate the logical manifest, completion status, artifact presence, and byte
+  size before ordinary reuse. Run `generate.py verify` to recompute and validate
+  the artifact checksum explicitly.
 - Publish a replacement payload only after successful generation.
 - Preserve the completed artifact when regeneration fails.
 - Keep cached data outside Git; `.benchmarks/` is ignored.

@@ -37,7 +37,9 @@ The default root is `.benchmarks/datasets`. Set `TSBS_DATASET_ROOT` or pass
 `--dataset-root` to share datasets. Use `--dataset-id` or `--dataset-path`, but
 not both. Existing logical datasets inherit stored settings unless explicit
 overrides conflict. Pass `--regenerate` only to intentionally replace a format
-variant and `--rebuild` only to rebuild the generator.
+variant and `--rebuild` only to rebuild the generator. Reuse validates the
+manifest, completion status, artifact presence, and byte size without rereading
+the complete artifact to recompute its checksum.
 
 ## Inspect and verify
 
@@ -50,5 +52,7 @@ python3 .agents/skills/generate-tsbs-data/scripts/generate.py verify \
 
 Use `--json` or `--result-file` for machine-readable output. Report the
 dataset ID and specification; for materialized variants also report format,
-data path, byte size, and SHA-256. Database-specific query generation belongs
-to the corresponding benchmark skill.
+data path, byte size, and recorded SHA-256. The `verify` command explicitly
+recomputes the artifact checksum and should be used when full cache integrity
+validation is required. Database-specific query generation belongs to the
+corresponding benchmark skill.
