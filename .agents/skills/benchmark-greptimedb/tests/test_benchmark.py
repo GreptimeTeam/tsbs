@@ -82,6 +82,23 @@ class WorkspaceTests(unittest.TestCase):
             with self.assertRaisesRegex(benchmark.BenchmarkError, "unsupported"):
                 benchmark.prepare_run(args)
 
+    def test_per_type_count_change_is_rejected_for_an_existing_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            parser = benchmark.make_parser()
+            initial = parser.parse_args([
+                "generate", "--run-root", str(root), "--only", "queries",
+                "--query-count", "lastpoint=7",
+            ])
+            run_dir, _ = benchmark.prepare_run(initial)
+            changed = parser.parse_args([
+                "generate", "--run-dir", str(run_dir), "--only", "queries",
+                "--query-count", "lastpoint=8",
+            ])
+
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "immutable"):
+                benchmark.prepare_run(changed)
+
 
 class QuerySetTests(unittest.TestCase):
     def make_args(self, run_dir: Path, query_root: Path, *types: str) -> argparse.Namespace:
@@ -131,6 +148,34 @@ class QuerySetTests(unittest.TestCase):
                 else: runner.assert_not_called()
             self.assertEqual(paths[0], paths[1])
             self.assertEqual(json.loads((root / "run-b/manifest.json").read_text())["query_set"]["reused"], True)
+
+    def test_generator_receives_each_per_type_count(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); run_dir = root / "run"; query_root = root / "queries"
+            args = benchmark.make_parser().parse_args([
+                "generate", "--run-dir", str(run_dir), "--query-root", str(query_root),
+                "--profile", "smoke", "--only", "queries",
+                "--query-count", "lastpoint=7",
+                "--query-count", "cpu-max-all-1=23",
+            ])
+            manifest = self.make_manifest(run_dir, args)
+            real_sha = benchmark.sha256_file
+
+            def hashes(path):
+                return "b" * 64 if path.name == benchmark.BINARIES["queries"] else real_sha(path)
+
+            with mock.patch.object(benchmark, "ensure_binaries"), mock.patch.object(
+                benchmark, "run_tee", side_effect=self.generator
+            ) as runner, mock.patch.object(benchmark, "sha256_file", side_effect=hashes):
+                benchmark.generate_queries(args, run_dir, manifest)
+
+            commands = [call.args[0] for call in runner.call_args_list]
+            counts_by_type = {
+                next(part.removeprefix("--query-type=") for part in command if part.startswith("--query-type=")):
+                next(part.removeprefix("--queries=") for part in command if part.startswith("--queries="))
+                for command in commands
+            }
+            self.assertEqual(counts_by_type, {"cpu-max-all-1": "23", "lastpoint": "7"})
 
     def test_failure_is_atomic_and_diagnostics_stay_in_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -178,6 +178,21 @@ class WorkspaceTests(unittest.TestCase):
             self.assertFalse((run_dir / "data").exists())
             self.assertFalse((run_dir / "influxdb3").exists())
 
+    def test_per_type_counts_define_the_influxdb3_query_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            args = benchmark.make_parser().parse_args([
+                "generate", "--run-root", temp, "--only", "queries",
+                "--query-count", "lastpoint=7",
+                "--query-count", "cpu-max-all-1=23",
+            ])
+
+            _, manifest = benchmark.prepare_run(args)
+
+        self.assertEqual(
+            manifest["workload"]["query_counts"],
+            {"cpu-max-all-1": 23, "lastpoint": 7},
+        )
+
     def test_old_or_malformed_run_manifest_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             run_dir = Path(temp)

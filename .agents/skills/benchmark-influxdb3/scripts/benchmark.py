@@ -35,6 +35,8 @@ from tsbs_benchmark import (  # noqa: E402
     lock_directory,
     new_run_dir as shared_new_run_dir,
     next_attempt,
+    parse_query_count,
+    query_count_overrides,
     query_file_path,
     read_json as shared_read_json,
     relative,
@@ -116,7 +118,7 @@ def prepare_run(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     if manifest_path.exists():
         manifest = read_json(manifest_path)
         validate_run_manifest(manifest, manifest_path)
-        workload_options = ("profile", "start", "end", "scale", "seed", "log_interval", "load_workers", "query_workers", "batch_size", "queries", "query_type")
+        workload_options = ("profile", "start", "end", "scale", "seed", "log_interval", "load_workers", "query_workers", "batch_size", "queries", "query_type", "query_count")
         if any(getattr(args, name, None) is not None for name in workload_options):
             requested = build_workload(
                 args,
@@ -616,7 +618,8 @@ def connection(args: argparse.Namespace, run_dir: Path, manifest: dict[str, Any]
 def add_run_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-dir", type=Path); parser.add_argument("--run-root", type=Path)
     parser.add_argument("--profile", choices=sorted(PROFILES)); parser.add_argument("--start"); parser.add_argument("--end"); parser.add_argument("--scale", type=int); parser.add_argument("--seed", type=int); parser.add_argument("--log-interval")
-    parser.add_argument("--load-workers", type=int); parser.add_argument("--query-workers", type=int); parser.add_argument("--batch-size", type=int); parser.add_argument("--queries", type=int, help="count for every selected query type")
+    parser.add_argument("--load-workers", type=int); parser.add_argument("--query-workers", type=int); parser.add_argument("--batch-size", type=int); parser.add_argument("--queries", type=int, help="default count for every selected query type")
+    parser.add_argument("--query-count", action="append", type=parse_query_count, metavar="QUERY_TYPE=COUNT", help="count for one query type; repeat for different counts")
     parser.add_argument("--query-type", action="append", choices=QUERY_TYPES); parser.add_argument("--query-root", type=Path); parser.add_argument("--regenerate", action="store_true"); parser.add_argument("--rebuild", action="store_true"); parser.add_argument("--dataset-root", type=Path)
     dataset = parser.add_mutually_exclusive_group(); dataset.add_argument("--dataset-id"); dataset.add_argument("--dataset-path", type=Path)
 
@@ -644,6 +647,13 @@ def validate_args(args: argparse.Namespace) -> None:
     for name in ("scale", "load_workers", "query_workers", "batch_size", "queries"):
         value = getattr(args, name, None)
         if value is not None and value <= 0: raise BenchmarkError(f"--{name.replace('_', '-')} must be positive")
+    try:
+        overrides = query_count_overrides(getattr(args, "query_count", None))
+    except ValueError as exc:
+        raise BenchmarkError(str(exc)) from exc
+    if getattr(args, "query_type", None):
+        unselected = sorted(set(overrides) - set(args.query_type))
+        if unselected: raise BenchmarkError("--query-count targets query types not selected by --query-type: " + ", ".join(unselected))
     for name in ("dataset_id", "database_id"):
         value = getattr(args, name, None)
         if value and not ID_RE.fullmatch(value): raise BenchmarkError(f"--{name.replace('_', '-')} contains invalid characters")
