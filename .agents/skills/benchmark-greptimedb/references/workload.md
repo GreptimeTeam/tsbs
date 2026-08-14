@@ -11,7 +11,8 @@
 └── greptimedb/
     ├── installations/<version>/<platform>/{manifest.json,greptime,...}
     ├── databases/<database-id>/{manifest.json,data/,logs/}
-    └── runs/<run-id>/{manifest.json,logs/,results/,summary.json,summary.md}
+    ├── runs/<run-id>/{manifest.json,logs/,results/,summary.json,summary.md}
+    └── comparisons/<comparison-id>/{manifest.json,summary.json,summary.md}
 ```
 
 A query-set identity includes the logical dataset identity and specification,
@@ -72,3 +73,24 @@ path, and binary checksum. A matching dataset is reused. A
 different dataset requires a successfully confirmed reset before the binding
 changes. External `create`, `reuse`, and `reset` map to the corresponding TSBS
 loader flags; external reuse may duplicate data.
+
+The database manifest's installation identity describes the version bound when
+the workspace was prepared or copied. A confirmed query-only override does not
+change it. The run target records the actual runtime version and checksum plus
+the workspace-bound identity, making separate runs safe to compare without
+rebinding metadata.
+
+Copied workspaces retain the source dataset binding and record their origin,
+source manifest checksum, full-copy method, and copied file and byte counts.
+They use independent storage and empty log directories.
+
+## Version comparisons
+
+Comparison artifacts use one explicit baseline and one or more candidates.
+They accept different managed database IDs so a source and copied workspace can
+be compared, but reject different SQL database names, datasets, query sets,
+query counts, repetitions, incomplete results, or failures. Per-query results
+contain baseline and candidate weighted means, millisecond and percentage
+deltas, candidate/baseline latency ratios, classifications, and source log
+paths. A zero baseline produces no ratio or percentage unless both values are
+zero. Comparisons report regressions but do not enforce thresholds.

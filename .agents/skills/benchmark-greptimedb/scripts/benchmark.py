@@ -47,12 +47,15 @@ from tsbs_benchmark import (  # noqa: E402
     write_streams,
 )
 from tsbs_environment import TsbsEnvironmentError, resolve_go  # noqa: E402
+from compare import ComparisonError, create_comparison  # noqa: E402
 from summarize import write_summary
 
 
 REPO_ROOT = SCRIPT_PATH.parents[4]
 BENCHMARK_ROOT = REPO_ROOT / ".benchmarks"
 DEFAULT_RUN_ROOT = BENCHMARK_ROOT / "greptimedb" / "runs"
+DEFAULT_COMPARISON_ROOT = BENCHMARK_ROOT / "greptimedb" / "comparisons"
+DEFAULT_INSTALL_ROOT = BENCHMARK_ROOT / "greptimedb" / "installations"
 DEFAULT_QUERY_ROOT = BENCHMARK_ROOT / "queries"
 DEFAULT_DATABASE_ROOT = BENCHMARK_ROOT / "greptimedb" / "databases"
 DEFAULT_DATASET_ROOT = BENCHMARK_ROOT / "datasets"
@@ -60,6 +63,7 @@ DATASET_RUNNER = REPO_ROOT / ".agents" / "skills" / "generate-tsbs-data" / "scri
 DEFAULT_DATABASE = "benchmark"
 SCHEMA_VERSION = 1
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
 DATA_WORKLOAD_OPTIONS = ("start", "end", "scale", "seed", "log_interval")
 BINARIES = {"queries": "tsbs_generate_queries", "load": "tsbs_load_greptime", "query": "tsbs_run_queries_influx"}
 BUILT_THIS_PROCESS: set[str] = set()
@@ -393,6 +397,38 @@ def prepare_database_workspace(args: argparse.Namespace) -> tuple[Path, dict[str
 def managed_binary(args: argparse.Namespace, manifest: dict[str, Any]) -> Path:
     prepared_path = manifest.get("installation_path")
     if prepared_path:
+        requested_version = getattr(args, "greptime_version", None)
+        if requested_version:
+            normalized = requested_version[1:] if requested_version.startswith("v") else requested_version
+            if not VERSION_RE.fullmatch(normalized):
+                raise BenchmarkError("--greptime-version must be an exact semantic version")
+            if normalized != manifest["version"] and getattr(args, "confirm_version_override", None) != manifest["database_id"]:
+                raise BenchmarkError("version override requires --confirm-version-override to exactly match --database-id")
+            install_root = (getattr(args, "install_root", None) or DEFAULT_INSTALL_ROOT).expanduser().resolve()
+            installation = install_root / normalized / manifest["platform"]
+            installation_manifest = read_json(installation / "manifest.json")
+            required = {"schema_version", "kind", "version", "platform", "binary", "binary_sha256"}
+            if (
+                installation_manifest.get("schema_version") != 1
+                or installation_manifest.get("kind") != "greptimedb-installation"
+                or not required.issubset(installation_manifest)
+                or installation_manifest["version"] != normalized
+                or installation_manifest["platform"] != manifest["platform"]
+            ):
+                raise BenchmarkError(f"alternate GreptimeDB installation identity mismatch: {installation}")
+            binary = (installation / installation_manifest["binary"]).resolve()
+            if installation.resolve() not in binary.parents:
+                raise BenchmarkError(f"alternate GreptimeDB binary escapes installation: {binary}")
+            if not binary.is_file() or not os.access(binary, os.X_OK) or sha256_file(binary) != installation_manifest["binary_sha256"]:
+                raise BenchmarkError(f"alternate GreptimeDB binary checksum mismatch: {binary}")
+            try:
+                result = subprocess.run([str(binary), "--version"], cwd=installation, capture_output=True, text=True, timeout=15, check=False)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise BenchmarkError(f"alternate GreptimeDB installation is not runnable: {binary}") from exc
+            tokens = re.split(r"\s+", f"{result.stdout}\n{result.stderr}".strip())
+            if result.returncode or not any(token.lstrip("v") == normalized or token.lstrip("v").startswith(normalized + "-") for token in tokens):
+                raise BenchmarkError(f"alternate GreptimeDB binary failed version validation for {normalized}: {binary}")
+            return binary.resolve()
         prepared = Path(prepared_path) / "greptime"
         if args.greptime_bin and args.greptime_bin.expanduser().resolve() != prepared.resolve():
             raise BenchmarkError("--greptime-bin conflicts with the binary bound to the prepared database workspace")
@@ -400,6 +436,35 @@ def managed_binary(args: argparse.Namespace, manifest: dict[str, Any]) -> Path:
     if not args.greptime_bin:
         raise BenchmarkError("legacy managed workspace requires --greptime-bin; prepare it with $setup-greptimedb for automatic binary discovery")
     return args.greptime_bin.expanduser().resolve()
+
+
+def managed_target(args: argparse.Namespace, manifest: dict[str, Any], binary: Path) -> dict[str, Any]:
+    runtime_version = getattr(args, "greptime_version", None)
+    if runtime_version:
+        runtime_version = runtime_version.lstrip("v")
+    else:
+        runtime_version = manifest.get("version")
+    workspace_version = manifest.get("version")
+    workspace_checksum = manifest.get("binary_sha256")
+    runtime_checksum = sha256_file(binary)
+    return {
+        "mode": "managed",
+        "endpoint": f"http://127.0.0.1:{args.http_port}",
+        "database": args.database,
+        "database_id": args.database_id,
+        "version": runtime_version,
+        "binary_sha256": runtime_checksum,
+        "workspace_version": workspace_version,
+        "workspace_binary_sha256": workspace_checksum,
+        "version_override": bool(runtime_version and workspace_version and runtime_version != workspace_version),
+    }
+
+
+def target_matches(existing: dict[str, Any], requested: dict[str, Any]) -> bool:
+    if existing == requested:
+        return True
+    legacy_fields = {"mode", "endpoint", "database", "database_id", "version", "binary_sha256"}
+    return not existing.keys() - legacy_fields and existing == {key: requested.get(key) for key in existing}
 
 
 @contextlib.contextmanager
@@ -439,6 +504,8 @@ def run_queries(args: argparse.Namespace, run_dir: Path, manifest: dict[str, Any
         binding = database_manifest.get("binding")
         if binding is None or binding["dataset_id"] != manifest["dataset"]["dataset_id"] or binding["spec"] != manifest["dataset"]["spec"]:
             raise BenchmarkError("managed database is not loaded with the query set's dataset")
+        manifest["dataset"].update({key: binding[key] for key in ("format", "bytes", "sha256")})
+        save_manifest(run_dir, manifest)
     ensure_binaries(run_dir, ["query"], args.rebuild); workload = manifest["workload"]
     for query_type in set_manifest["spec"]["query_counts"]:
         attempt = next_attempt(manifest["events"]["queries"], query_type); log_path = run_dir / "logs" / f"query-{query_type}-run-{attempt:03d}.log"; result_path = run_dir / "results" / f"query-{query_type}-run-{attempt:03d}.json"
@@ -466,12 +533,19 @@ def check_port_available(port: int) -> None:
 
 
 @contextlib.contextmanager
-def connection(args: argparse.Namespace, run_dir: Path) -> Iterator[tuple[str, bool, dict[str, Any] | None, Path | None]]:
+def connection(args: argparse.Namespace, run_dir: Path, existing_target: dict[str, Any] | None = None) -> Iterator[tuple[str, bool, dict[str, Any] | None, Path | None, dict[str, Any]]]:
     if args.endpoint:
-        yield args.endpoint.rstrip("/"), False, None, None; return
+        endpoint = args.endpoint.rstrip("/")
+        target = {"mode": "external", "endpoint": endpoint, "database": args.database, "database_id": None, "version": None, "binary_sha256": None}
+        if existing_target and not target_matches(existing_target, target):
+            raise BenchmarkError("run target is immutable; create a new run for another GreptimeDB version or target")
+        yield endpoint, False, None, None, target; return
     workspace, database_manifest = prepare_database_workspace(args)
     with lock_database(workspace):
         binary = managed_binary(args, database_manifest)
+        target = managed_target(args, database_manifest, binary)
+        if existing_target and not target_matches(existing_target, target):
+            raise BenchmarkError("run target is immutable; create a new run for another GreptimeDB version or target")
         if not binary.is_file() or not os.access(binary, os.X_OK): raise BenchmarkError(f"GreptimeDB binary is not executable: {binary}")
         check_port_available(args.http_port); endpoint = f"http://127.0.0.1:{args.http_port}"; process_log_path = run_dir / "logs" / "greptimedb-process.log"; process_log = process_log_path.open("a", encoding="utf-8")
         command = [str(binary), "standalone", "start", "--http-addr", f"127.0.0.1:{args.http_port}", "--influxdb-enable", "--data-home", str(workspace / "data"), "--log-dir", str(workspace / "logs")]
@@ -483,7 +557,7 @@ def connection(args: argparse.Namespace, run_dir: Path) -> Iterator[tuple[str, b
                 if endpoint_ready(endpoint): break
                 time.sleep(0.5)
             else: raise BenchmarkError(f"GreptimeDB was not ready within {args.startup_timeout}s; see {process_log_path}")
-            yield endpoint, True, database_manifest, workspace
+            yield endpoint, True, database_manifest, workspace, target
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -505,6 +579,12 @@ def add_connection_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--greptime-bin", type=Path); parser.add_argument("--endpoint"); parser.add_argument("--http-port", type=int, default=4000); parser.add_argument("--startup-timeout", type=int, default=60); parser.add_argument("--database", help=f"SQL database name (default: {DEFAULT_DATABASE})"); parser.add_argument("--database-id"); parser.add_argument("--database-root", type=Path)
 
 
+def add_version_override_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--greptime-version")
+    parser.add_argument("--install-root", type=Path)
+    parser.add_argument("--confirm-version-override")
+
+
 def add_load_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--database-mode", choices=("create", "reuse", "reset")); parser.add_argument("--confirm-reset")
 
@@ -514,9 +594,10 @@ def make_parser() -> argparse.ArgumentParser:
     build = subparsers.add_parser("build"); build.add_argument("--run-dir", type=Path); build.add_argument("--run-root", type=Path); build.add_argument("--rebuild", action="store_true")
     generate = subparsers.add_parser("generate"); add_run_options(generate); generate.add_argument("--only", choices=("all", "data", "queries"), default="all")
     load = subparsers.add_parser("load"); add_run_options(load); add_connection_options(load); add_load_options(load)
-    query = subparsers.add_parser("query"); add_run_options(query); add_connection_options(query)
+    query = subparsers.add_parser("query"); add_run_options(query); add_connection_options(query); add_version_override_options(query)
     all_command = subparsers.add_parser("all"); add_run_options(all_command); add_connection_options(all_command); add_load_options(all_command)
     summarize = subparsers.add_parser("summarize"); summarize.add_argument("--run-dir", required=True, type=Path)
+    compare = subparsers.add_parser("compare"); compare.add_argument("--baseline-run", required=True, type=Path); compare.add_argument("--candidate-run", required=True, action="append", type=Path); compare.add_argument("--comparison-root", type=Path)
     return parser
 
 
@@ -535,9 +616,13 @@ def validate_args(args: argparse.Namespace) -> None:
         value = getattr(args, name, None)
         if value and not ID_RE.fullmatch(value): raise BenchmarkError(f"--{name.replace('_', '-')} contains invalid characters")
     if args.command in ("load", "query", "all"):
-        if args.endpoint and (args.greptime_bin or args.database_id): raise BenchmarkError("external GreptimeDB cannot use --greptime-bin or --database-id")
+        greptime_version = getattr(args, "greptime_version", None)
+        if args.endpoint and (args.greptime_bin or args.database_id or greptime_version): raise BenchmarkError("external GreptimeDB cannot use managed binary or database options")
         if not args.endpoint and not args.database_id: raise BenchmarkError("provide --database-id for managed GreptimeDB or --endpoint for external GreptimeDB")
         if args.endpoint and args.database_id: raise BenchmarkError("--database-id is only valid with managed GreptimeDB")
+        if greptime_version and args.greptime_bin: raise BenchmarkError("--greptime-version cannot be combined with --greptime-bin")
+        if getattr(args, "install_root", None) and not greptime_version: raise BenchmarkError("--install-root requires --greptime-version")
+        if getattr(args, "confirm_version_override", None) and not greptime_version: raise BenchmarkError("--confirm-version-override requires --greptime-version")
         if args.endpoint:
             parsed = urllib.parse.urlparse(args.endpoint)
             if parsed.scheme not in ("http", "https") or not parsed.netloc: raise BenchmarkError("--endpoint must be an absolute HTTP or HTTPS URL")
@@ -552,6 +637,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         resolve_database(args); validate_args(args)
         if args.command == "summarize":
             run_dir = args.run_dir.resolve(); manifest = read_json(run_dir / "manifest.json"); validate_run_manifest(manifest, run_dir / "manifest.json"); summary = write_summary(run_dir, manifest); print(run_dir / "summary.md"); return 1 if summary["failures"] else 0
+        if args.command == "compare":
+            comparison_dir = create_comparison(args.baseline_run, args.candidate_run, args.comparison_root or DEFAULT_COMPARISON_ROOT)
+            print(f"Comparison directory: {comparison_dir}"); print(f"Summary: {comparison_dir / 'summary.md'}"); return 0
         if args.command == "build":
             run_dir = args.run_dir.resolve() if args.run_dir else new_run_dir((args.run_root or DEFAULT_RUN_ROOT).resolve()); (run_dir / "logs").mkdir(parents=True, exist_ok=True); (run_dir / "results").mkdir(parents=True, exist_ok=True); ensure_binaries(run_dir, list(BINARIES), args.rebuild); print(run_dir); return 0
         run_dir, manifest = prepare_run(args)
@@ -559,12 +647,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.only in ("all", "data"): generate_data(args, run_dir, manifest)
             if args.only in ("all", "queries"): generate_queries(args, run_dir, manifest)
         elif args.command in ("load", "query", "all"):
-            with connection(args, run_dir) as (endpoint, managed, database_manifest, database_path):
-                manifest["target"] = {"mode": "managed" if managed else "external", "endpoint": endpoint, "database": args.database, "database_id": args.database_id if managed else None, "version": database_manifest.get("version") if database_manifest else None, "binary_sha256": database_manifest.get("binary_sha256") if database_manifest else None}; save_manifest(run_dir, manifest)
+            with connection(args, run_dir, manifest.get("target")) as (endpoint, managed, database_manifest, database_path, target):
+                manifest["target"] = target; save_manifest(run_dir, manifest)
                 if args.command in ("load", "all"): load_data(args, run_dir, manifest, endpoint, managed, database_manifest, database_path)
                 if args.command in ("query", "all"): run_queries(args, run_dir, manifest, endpoint, database_manifest)
         summary = write_summary(run_dir, manifest); print(f"Run directory: {run_dir}"); print(f"Summary: {run_dir / 'summary.md'}"); return 1 if summary["failures"] else 0
-    except (BenchmarkError, TsbsEnvironmentError, OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (BenchmarkError, ComparisonError, TsbsEnvironmentError, OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
         if run_dir is not None and manifest is not None:
             try: write_summary(run_dir, manifest)
             except OSError: pass

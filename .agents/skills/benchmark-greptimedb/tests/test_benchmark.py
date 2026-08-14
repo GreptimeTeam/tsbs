@@ -13,6 +13,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import benchmark  # noqa: E402
+import compare as version_compare  # noqa: E402
 import summarize  # noqa: E402
 
 
@@ -41,6 +42,20 @@ class SummaryIntegrationTests(unittest.TestCase):
         self.assertIn("GreptimeDB binary SHA-256: `def`", rendered)
         self.assertIn("set-a", rendered)
 
+    def test_version_override_identity_is_rendered(self) -> None:
+        summary = {
+            "run_id": "run", "profile": "smoke", "database": "benchmark",
+            "target": {
+                "mode": "managed", "database_id": "db-a", "version": "1.0.0",
+                "binary_sha256": "old", "workspace_version": "1.1.4",
+                "workspace_binary_sha256": "new", "version_override": True,
+            },
+            "ingestion_runs": [], "queries": [], "failures": [],
+        }
+        rendered = summarize.render_markdown(summary)
+        self.assertIn("Runtime GreptimeDB version: `1.0.0`", rendered)
+        self.assertIn("Workspace-bound GreptimeDB version: `1.1.4`", rendered)
+
 
 class QuerySetIdentityTests(unittest.TestCase):
     def dataset(self) -> dict:
@@ -60,6 +75,74 @@ class QuerySetIdentityTests(unittest.TestCase):
         subset = benchmark.query_set_spec(self.dataset(), self.workload({"lastpoint": 3}))
         self.assertNotEqual(benchmark.query_set_id(first), benchmark.query_set_id(changed_count))
         self.assertNotEqual(benchmark.query_set_id(first), benchmark.query_set_id(subset))
+
+
+class VersionComparisonTests(unittest.TestCase):
+    def make_run(self, root: Path, name: str, version: str, means: dict[str, float], *, dataset_id: str = "data-a") -> Path:
+        run_dir = root / name; (run_dir / "results").mkdir(parents=True); (run_dir / "logs").mkdir()
+        query_counts = {query_type: 10 for query_type in means}
+        events = []
+        for query_type, mean in means.items():
+            result = run_dir / "results" / f"{query_type}.json"
+            result.write_text(json.dumps({"ResultFormatVersion": "0.2", "Totals": {"overallStats": {"all_queries": {"meanMilliseconds": mean, "count": 10}}}}), encoding="utf-8")
+            log = run_dir / "logs" / f"{query_type}.log"; log.write_text("completed\n", encoding="utf-8")
+            events.append({
+                "query_type": query_type, "attempt": 1, "database": "benchmark",
+                "log": f"logs/{query_type}.log", "results": f"results/{query_type}.json",
+                "status": "completed",
+            })
+        manifest = {
+            "schema_version": 1, "kind": "greptimedb-run", "run_id": name,
+            "created_at": benchmark.utc_now(), "profile": "manual", "database": "benchmark",
+            "workload": {"query_counts": query_counts},
+            "target": {"mode": "managed", "database_id": f"db-{version}", "version": version, "binary_sha256": version * 4},
+            "dataset": {"dataset_id": dataset_id, "spec": {"scale": 10}, "format": "influx", "bytes": 100, "sha256": "d" * 64},
+            "query_set": {"query_set_id": "set-a", "manifest_sha256": "q" * 64, "spec": {"query_counts": query_counts}},
+            "events": {"loads": [], "queries": events},
+        }
+        benchmark.save_json(run_dir / "manifest.json", manifest)
+        return run_dir
+
+    def test_compares_saved_runs_and_writes_immutable_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            baseline = self.make_run(root, "baseline", "1.1.4", {"lastpoint": 10.0, "high-cpu-1": 20.0})
+            candidate = self.make_run(root, "candidate", "1.0.0", {"lastpoint": 12.0, "high-cpu-1": 10.0})
+            output = version_compare.create_comparison(baseline, [candidate], root / "comparisons")
+            summary = json.loads((output / "summary.json").read_text())
+            by_type = {item["query_type"]: item for item in summary["candidates"][0]["queries"]}
+            self.assertAlmostEqual(by_type["lastpoint"]["delta_percent"], 20.0)
+            self.assertEqual(by_type["lastpoint"]["classification"], "regressed")
+            self.assertEqual(by_type["high-cpu-1"]["classification"], "improved")
+            self.assertEqual(summary["candidates"][0]["counts"], {"improved": 1, "unchanged": 0, "regressed": 1})
+            self.assertTrue((output / "manifest.json").is_file())
+            self.assertIn("Latency ratio", (output / "summary.md").read_text())
+            second = version_compare.create_comparison(baseline, [candidate], root / "comparisons")
+            self.assertNotEqual(output, second)
+
+    def test_rejects_mismatched_or_incomplete_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            baseline = self.make_run(root, "baseline", "1.1.4", {"lastpoint": 10.0})
+            mismatch = self.make_run(root, "mismatch", "1.0.0", {"lastpoint": 12.0}, dataset_id="data-b")
+            with self.assertRaisesRegex(version_compare.ComparisonError, "does not match"):
+                version_compare.create_comparison(baseline, [mismatch], root / "comparisons")
+            incomplete = self.make_run(root, "incomplete", "1.0.0", {"lastpoint": 12.0})
+            manifest = json.loads((incomplete / "manifest.json").read_text())
+            manifest["events"]["queries"][0]["status"] = "failed"
+            benchmark.save_json(incomplete / "manifest.json", manifest)
+            with self.assertRaisesRegex(version_compare.ComparisonError, "failures"):
+                version_compare.create_comparison(baseline, [incomplete], root / "comparisons")
+
+    def test_zero_baseline_latency_has_no_infinite_ratio(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            baseline = self.make_run(root, "baseline", "1.1.4", {"lastpoint": 0.0})
+            candidate = self.make_run(root, "candidate", "1.0.0", {"lastpoint": 1.0})
+            output = version_compare.create_comparison(baseline, [candidate], root / "comparisons")
+            query = json.loads((output / "summary.json").read_text())["candidates"][0]["queries"][0]
+            self.assertIsNone(query["delta_percent"])
+            self.assertIsNone(query["latency_ratio"])
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -213,11 +296,16 @@ class QuerySetTests(unittest.TestCase):
                 benchmark.generate_queries(args, run_dir, manifest)
             def execute(_command, log_path, **_kwargs):
                 log_path.write_text("Run complete after 1 queries\nall queries:\nmin: 1ms, mean: 1ms, max: 1ms, count: 1\n", encoding="utf-8")
+            binding = {
+                "dataset_id": manifest["dataset"]["dataset_id"], "spec": manifest["dataset"]["spec"],
+                "format": "influx", "bytes": 123, "sha256": "d" * 64,
+            }
             with mock.patch.object(benchmark, "generate_queries", return_value=Path(manifest["query_set"]["query_set_path"])), mock.patch.object(benchmark, "ensure_binaries"), mock.patch.object(benchmark, "run_tee", side_effect=execute) as runner:
-                benchmark.run_queries(args, run_dir, manifest, "http://localhost:4000")
+                benchmark.run_queries(args, run_dir, manifest, "http://localhost:4000", {"binding": binding})
             self.assertEqual(runner.call_count, 2)
             self.assertEqual(len(manifest["events"]["queries"]), 2)
             self.assertTrue(all(event["file_sha256"] for event in manifest["events"]["queries"]))
+            self.assertEqual(manifest["dataset"]["sha256"], "d" * 64)
 
 
 class BuildEnvironmentTests(unittest.TestCase):
@@ -314,6 +402,53 @@ class ManagedDatabaseTests(unittest.TestCase):
             with self.assertRaisesRegex(benchmark.BenchmarkError, "does not exist"):
                 benchmark.prepare_database_workspace(args)
             self.assertFalse((root / "db-a").exists())
+
+    def test_query_can_use_confirmed_installed_version_without_rebinding_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bound_installation = root / "installations/1.1.4/linux_amd64"; bound_installation.mkdir(parents=True)
+            bound_binary = bound_installation / "greptime"; bound_binary.write_text("#!/bin/sh\necho 'greptime 1.1.4'\n", encoding="utf-8"); bound_binary.chmod(0o755)
+            alternate = root / "installations/1.0.0/linux_amd64"; alternate.mkdir(parents=True)
+            alternate_binary = alternate / "greptime"; alternate_binary.write_text("#!/bin/sh\necho 'greptime 1.0.0'\n", encoding="utf-8"); alternate_binary.chmod(0o755)
+            benchmark.save_json(alternate / "manifest.json", {
+                "schema_version": 1, "kind": "greptimedb-installation", "version": "1.0.0",
+                "platform": "linux_amd64", "binary": "greptime",
+                "binary_sha256": benchmark.sha256_file(alternate_binary),
+            })
+            database = root / "databases/db-a"; (database / "data").mkdir(parents=True); (database / "logs").mkdir()
+            original = {
+                "schema_version": 1, "kind": "greptimedb-database", "database_id": "db-a",
+                "created_at": benchmark.utc_now(), "database": "benchmark", "binding": None,
+                "version": "1.1.4", "version_source": "explicit", "platform": "linux_amd64",
+                "installation_path": str(bound_installation), "binary_sha256": benchmark.sha256_file(bound_binary),
+            }
+            benchmark.save_json(database / "manifest.json", original)
+            args = benchmark.make_parser().parse_args([
+                "query", "--database-id", "db-a", "--database-root", str(root / "databases"),
+                "--database", "benchmark", "--greptime-version", "1.0.0",
+                "--install-root", str(root / "installations"), "--confirm-version-override", "db-a",
+            ])
+            manifest = benchmark.validate_database_manifest(database, "db-a")
+            binary = benchmark.managed_binary(args, manifest)
+            target = benchmark.managed_target(args, manifest, binary)
+            self.assertEqual(binary, alternate_binary.resolve())
+            self.assertEqual(target["version"], "1.0.0")
+            self.assertEqual(target["workspace_version"], "1.1.4")
+            self.assertTrue(target["version_override"])
+            self.assertEqual(json.loads((database / "manifest.json").read_text()), original)
+
+            args.confirm_version_override = "wrong"
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "exactly match"):
+                benchmark.managed_binary(args, manifest)
+
+    def test_version_override_is_query_only_and_managed_only(self) -> None:
+        parser = benchmark.make_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["load", "--database-id", "db-a", "--greptime-version", "1.0.0"])
+        args = parser.parse_args(["query", "--endpoint", "http://localhost:4000", "--greptime-version", "1.0.0"])
+        benchmark.resolve_database(args)
+        with self.assertRaisesRegex(benchmark.BenchmarkError, "external GreptimeDB"):
+            benchmark.validate_args(args)
 
 
 if __name__ == "__main__":

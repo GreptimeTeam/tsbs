@@ -45,6 +45,32 @@ command execution time and never upgrades an existing workspace automatically.
 Do not adopt or rewrite a legacy benchmark workspace; continue using it with an
 explicit binary or choose a new database ID.
 
+## Copy a loaded workspace for another version
+
+Install the target version first, then create a fully independent database
+copy:
+
+```bash
+python3 .agents/skills/setup-greptimedb/scripts/setup.py install \
+  --version 1.1.4
+
+python3 .agents/skills/setup-greptimedb/scripts/setup.py copy \
+  --source-database-id loaded-current \
+  --database-id loaded-114 \
+  --version 1.1.4
+```
+
+The source must be a loaded setup-managed workspace and the destination must
+not exist. The command locks the source, fully copies `data/` without reflinks
+or hard links, creates empty logs, preserves the SQL database and dataset
+binding, records copy provenance, and publishes atomically. It never overwrites
+or resumes a destination. Manually started GreptimeDB processes do not
+participate in the cooperative workspace lock.
+
+Use `$benchmark-greptimedb` to query the copied database ID. For an exact-path
+comparison without a copy, use that skill's confirmed query-only runtime
+version override instead.
+
 ## Inspect and verify
 
 ```bash
