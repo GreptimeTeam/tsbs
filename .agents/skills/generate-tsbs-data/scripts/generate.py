@@ -145,7 +145,12 @@ def validate_dataset_manifest(dataset_dir: Path, expected_spec: dict[str, Any] |
     return manifest
 
 
-def validate_variant(dataset_dir: Path, format_name: str) -> dict[str, Any]:
+def validate_variant(
+    dataset_dir: Path,
+    format_name: str,
+    *,
+    verify_checksum: bool = True,
+) -> dict[str, Any]:
     variant_dir = dataset_dir / "formats" / format_name
     manifest = read_json(variant_dir / "manifest.json")
     if manifest.get("status") != "completed":
@@ -155,9 +160,20 @@ def validate_variant(dataset_dir: Path, format_name: str) -> dict[str, Any]:
     artifact = variant_dir / str(manifest.get("artifact", "data"))
     if not artifact.is_file():
         raise DatasetError(f"missing dataset artifact: {artifact}")
+    recorded_size = manifest.get("bytes")
+    recorded_checksum = manifest.get("sha256")
+    if (
+        isinstance(recorded_size, bool)
+        or not isinstance(recorded_size, int)
+        or recorded_size < 0
+        or not isinstance(recorded_checksum, str)
+        or re.fullmatch(r"[0-9a-f]{64}", recorded_checksum) is None
+    ):
+        raise DatasetError(f"malformed dataset format manifest: {variant_dir}")
     actual_size = artifact.stat().st_size
-    actual_checksum = sha256_file(artifact)
-    if actual_size != manifest.get("bytes") or actual_checksum != manifest.get("sha256"):
+    if actual_size != recorded_size:
+        raise DatasetError(f"dataset artifact size mismatch: {artifact}")
+    if verify_checksum and sha256_file(artifact) != recorded_checksum:
         raise DatasetError(f"dataset artifact checksum mismatch: {artifact}")
     return manifest
 
@@ -235,7 +251,9 @@ def generate_variant(
         if existing.get("status") == "completed":
             if rebuild:
                 run_build(log_path, True)
-            manifest = validate_variant(dataset_dir, format_name)
+            manifest = validate_variant(
+                dataset_dir, format_name, verify_checksum=False
+            )
             return result(dataset_dir, dataset_manifest, manifest, reused=True)
 
     variant_dir.mkdir(parents=True, exist_ok=True)
@@ -418,7 +436,7 @@ def verify_dataset(args: argparse.Namespace) -> dict[str, Any]:
     variants = []
     for format_name in formats:
         validate_format(format_name)
-        variant = validate_variant(path, format_name)
+        variant = validate_variant(path, format_name, verify_checksum=True)
         variants.append(result(path, manifest, variant, reused=True))
     return {"dataset_id": manifest["dataset_id"], "dataset_path": str(path), "variants": variants}
 

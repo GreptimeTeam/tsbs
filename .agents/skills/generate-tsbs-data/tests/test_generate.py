@@ -110,16 +110,61 @@ class DatasetVariantTests(unittest.TestCase):
             self.assertTrue(reused["reused"])
             self.assertNotEqual(influx["sha256"], timescale["sha256"])
 
-    def test_corrupt_artifact_is_rejected(self) -> None:
+    def test_reuse_skips_checksum_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake = self.make_generator(root, "print('valid')\n")
+            dataset_dir, manifest = self.prepare(root)
+            with mock.patch.object(generate, "GENERATOR", fake):
+                generate.generate_variant(
+                    dataset_dir, manifest, "influx", regenerate=False, rebuild=False
+                )
+                with mock.patch.object(
+                    generate,
+                    "sha256_file",
+                    side_effect=AssertionError("reuse must not hash the artifact"),
+                ):
+                    reused = generate.generate_variant(
+                        dataset_dir,
+                        manifest,
+                        "influx",
+                        regenerate=False,
+                        rebuild=False,
+                    )
+            self.assertTrue(reused["reused"])
+
+    def test_reuse_rejects_artifact_size_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake = self.make_generator(root, "print('valid')\n")
+            dataset_dir, manifest = self.prepare(root)
+            with mock.patch.object(generate, "GENERATOR", fake):
+                result = generate.generate_variant(
+                    dataset_dir, manifest, "influx", regenerate=False, rebuild=False
+                )
+                Path(result["data_path"]).write_text("longer payload\n", encoding="utf-8")
+                with self.assertRaisesRegex(generate.DatasetError, "size mismatch"):
+                    generate.generate_variant(
+                        dataset_dir,
+                        manifest,
+                        "influx",
+                        regenerate=False,
+                        rebuild=False,
+                    )
+
+    def test_explicit_verify_rejects_same_size_corruption(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             fake = self.make_generator(root, "print('valid')\n")
             dataset_dir, manifest = self.prepare(root)
             with mock.patch.object(generate, "GENERATOR", fake):
                 result = generate.generate_variant(dataset_dir, manifest, "influx", regenerate=False, rebuild=False)
-            Path(result["data_path"]).write_text("corrupt\n", encoding="utf-8")
+            Path(result["data_path"]).write_text("bad!!\n", encoding="utf-8")
+            verify_args = generate.make_parser().parse_args(
+                ["verify", "--dataset-path", str(dataset_dir), "--format", "influx"]
+            )
             with self.assertRaisesRegex(generate.DatasetError, "checksum mismatch"):
-                generate.validate_variant(dataset_dir, "influx")
+                generate.verify_dataset(verify_args)
 
     def test_failed_regeneration_preserves_completed_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
