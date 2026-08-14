@@ -28,3 +28,18 @@ Prepared manifests bind the database ID, SQL database name, release version,
 platform, installation path, and binary checksum. Dataset binding remains owned
 by the benchmark skill. Legacy benchmark manifests intentionally lack release
 identity and require an explicit `--greptime-bin`.
+
+A copied workspace is prepared from a loaded managed source while holding the
+same cooperative directory lock used by the benchmark runner. Only `data/` is
+copied; logs start empty. The destination uses a new database ID and target
+installation identity while preserving the source SQL database and dataset
+binding. Copying is full and independent: symbolic links and other special
+entries in `data/` are rejected, and reflinks and hard links are not used. The
+destination is staged beside the database root and atomically published only
+after file counts and byte counts match.
+
+Copy provenance records the source database ID and path, version and binary
+checksum, source manifest checksum, timestamp, method, file count, and byte
+count. The target version must be exact and already installed. Copying does not
+assert that GreptimeDB supports downgrade or upgrade startup for those data
+files.

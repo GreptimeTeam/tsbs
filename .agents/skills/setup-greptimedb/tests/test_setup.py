@@ -114,11 +114,11 @@ class InstallationTests(unittest.TestCase):
 
 
 class DatabaseTests(unittest.TestCase):
-    def make_installation(self, root: Path) -> Path:
-        path = root / "installations/1.1.4/linux_amd64"; path.mkdir(parents=True)
-        binary = path / "greptime"; binary.write_text("#!/bin/sh\necho 'greptime 1.1.4'\n", encoding="utf-8"); binary.chmod(0o755)
+    def make_installation(self, root: Path, version: str = "1.1.4") -> Path:
+        path = root / f"installations/{version}/linux_amd64"; path.mkdir(parents=True)
+        binary = path / "greptime"; binary.write_text(f"#!/bin/sh\necho 'greptime {version}'\n", encoding="utf-8"); binary.chmod(0o755)
         manifest = {
-            "schema_version": 1, "kind": "greptimedb-installation", "version": "1.1.4",
+            "schema_version": 1, "kind": "greptimedb-installation", "version": version,
             "version_source": "explicit", "platform": "linux_amd64", "binary": "greptime",
             "binary_sha256": setup.sha256_file(binary), "archive_sha256": "a" * 64,
             "distribution_sha256": setup.distribution_sha256(path),
@@ -147,6 +147,61 @@ class DatabaseTests(unittest.TestCase):
             setup.save_json(path / "manifest.json", {"schema_version": 1, "kind": "greptimedb-database", "database_id": "db-a", "database": "benchmark", "binding": None})
             with mock.patch.object(setup, "platform_tag", return_value="linux_amd64"), self.assertRaisesRegex(setup.SetupError, "legacy"):
                 setup.prepare(self.args(root))
+
+    def test_copy_loaded_database_to_an_independent_version_bound_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.make_installation(root); self.make_installation(root, "1.0.0")
+            with mock.patch.object(setup, "platform_tag", return_value="linux_amd64"):
+                prepared = setup.prepare(self.args(root))
+            source = Path(prepared["database_path"])
+            source_file = source / "data/region/file.parquet"
+            source_file.parent.mkdir(parents=True); source_file.write_bytes(b"loaded-data")
+            manifest = setup.read_json(source / "manifest.json")
+            manifest["binding"] = {
+                "dataset_id": "data-a", "spec": {"scale": 10}, "format": "influx",
+                "bytes": 11, "sha256": "a" * 64,
+            }
+            setup.save_json(source / "manifest.json", manifest)
+            args = argparse.Namespace(
+                source_database_id="db-a", database_id="db-old", version="1.0.0",
+                version_source="explicit", install_root=root / "installations",
+                database_root=root / "databases",
+            )
+
+            with mock.patch.object(setup, "platform_tag", return_value="linux_amd64"):
+                result = setup.copy_database(args)
+
+            destination = Path(result["database_path"])
+            copied = setup.validate_database(destination, "db-old")
+            self.assertEqual(copied["version"], "1.0.0")
+            self.assertEqual(copied["binding"], manifest["binding"])
+            self.assertEqual(copied["copied_from"]["method"], "full")
+            self.assertEqual(copied["copied_from"]["files"], 1)
+            self.assertEqual(list((destination / "logs").iterdir()), [])
+            self.assertNotEqual(source_file.stat().st_ino, (destination / "data/region/file.parquet").stat().st_ino)
+            (destination / "data/region/file.parquet").write_bytes(b"changed")
+            self.assertEqual(source_file.read_bytes(), b"loaded-data")
+
+    def test_copy_rejects_unloaded_existing_and_locked_workspaces(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.make_installation(root); self.make_installation(root, "1.0.0")
+            with mock.patch.object(setup, "platform_tag", return_value="linux_amd64"):
+                source = Path(setup.prepare(self.args(root))["database_path"])
+            args = argparse.Namespace(
+                source_database_id="db-a", database_id="db-old", version="1.0.0",
+                version_source="explicit", install_root=root / "installations",
+                database_root=root / "databases",
+            )
+            with mock.patch.object(setup, "platform_tag", return_value="linux_amd64"), self.assertRaisesRegex(setup.SetupError, "no loaded dataset"):
+                setup.copy_database(args)
+            manifest = setup.read_json(source / "manifest.json")
+            manifest["binding"] = {"dataset_id": "a", "spec": {}, "format": "influx", "bytes": 0, "sha256": "a"}
+            setup.save_json(source / "manifest.json", manifest)
+            with setup.lock_database(source), mock.patch.object(setup, "platform_tag", return_value="linux_amd64"), self.assertRaisesRegex(setup.SetupError, "locked"):
+                setup.copy_database(args)
+            (root / "databases/db-old").mkdir()
+            with mock.patch.object(setup, "platform_tag", return_value="linux_amd64"), self.assertRaisesRegex(setup.SetupError, "already exists"):
+                setup.copy_database(args)
 
 
 if __name__ == "__main__":

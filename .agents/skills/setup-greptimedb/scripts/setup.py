@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
@@ -18,7 +20,7 @@ import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path, PurePosixPath
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -310,6 +312,34 @@ def database_path(args: argparse.Namespace) -> Path:
     return (args.database_root or DEFAULT_DATABASE_ROOT).expanduser().resolve() / args.database_id
 
 
+@contextlib.contextmanager
+def lock_database(path: Path) -> Iterator[None]:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise SetupError(f"managed database workspace is locked: {path}") from exc
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def copy_tree_stats(path: Path) -> tuple[int, int]:
+    files = 0
+    size = 0
+    for entry in path.rglob("*"):
+        if entry.is_symlink():
+            raise SetupError(f"database data directory contains unsupported symlink: {entry}")
+        if entry.is_file():
+            files += 1
+            size += entry.stat().st_size
+        elif not entry.is_dir():
+            raise SetupError(f"database data directory contains unsupported entry: {entry}")
+    return files, size
+
+
 def validate_database(path: Path, expected_id: str | None = None) -> dict[str, Any]:
     manifest = read_json(path / "manifest.json")
     required = {
@@ -350,6 +380,71 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     return {**manifest, "database_path": str(path), "reused": False}
 
 
+def copy_database(args: argparse.Namespace) -> dict[str, Any]:
+    root = (args.database_root or DEFAULT_DATABASE_ROOT).expanduser().resolve()
+    source = root / args.source_database_id
+    destination = root / args.database_id
+    if source == destination:
+        raise SetupError("source and destination database IDs must differ")
+    if destination.exists():
+        raise SetupError(f"destination database workspace already exists: {destination}")
+
+    installed = validate_installation(installation_path(args), args.version)
+
+    root.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{args.database_id}.copy-", dir=root))
+    try:
+        with lock_database(source):
+            source_manifest = validate_database(source, args.source_database_id)
+            if source_manifest["binding"] is None:
+                raise SetupError("source database workspace has no loaded dataset binding")
+            if installed["platform"] != source_manifest["platform"]:
+                raise SetupError("target installation platform differs from the source database platform")
+            source_data = source / "data"
+            if not source_data.is_dir():
+                raise SetupError(f"source database data directory does not exist: {source_data}")
+            file_count, byte_count = copy_tree_stats(source_data)
+            shutil.copytree(source_data, temporary / "data", copy_function=shutil.copy2)
+            copied_files, copied_bytes = copy_tree_stats(temporary / "data")
+            if (copied_files, copied_bytes) != (file_count, byte_count):
+                raise SetupError("copied database data does not match source file count and size")
+            (temporary / "logs").mkdir()
+            copied_at = utc_now()
+            manifest = {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "greptimedb-database",
+                "database_id": args.database_id,
+                "version": args.version,
+                "version_source": args.version_source,
+                "platform": installed["platform"],
+                "installation_path": str(installation_path(args)),
+                "binary_sha256": installed["binary_sha256"],
+                "created_at": copied_at,
+                "updated_at": copied_at,
+                "database": source_manifest["database"],
+                "binding": source_manifest["binding"],
+                "copied_from": {
+                    "database_id": source_manifest["database_id"],
+                    "database_path": str(source),
+                    "version": source_manifest["version"],
+                    "binary_sha256": source_manifest["binary_sha256"],
+                    "manifest_sha256": sha256_file(source / "manifest.json"),
+                    "copied_at": copied_at,
+                    "method": "full",
+                    "files": copied_files,
+                    "bytes": copied_bytes,
+                },
+            }
+            save_json(temporary / "manifest.json", manifest)
+            if destination.exists():
+                raise SetupError(f"destination database workspace already exists: {destination}")
+            os.replace(temporary, destination)
+        return {**manifest, "database_path": str(destination), "reused": False}
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+
+
 def print_value(value: Any) -> None:
     print(json.dumps(value, indent=2, sort_keys=True))
 
@@ -358,6 +453,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__); sub = parser.add_subparsers(dest="command", required=True)
     install_parser = sub.add_parser("install"); install_parser.add_argument("--version"); install_parser.add_argument("--install-root", type=Path); install_parser.add_argument("--reinstall", action="store_true")
     prepare_parser = sub.add_parser("prepare"); prepare_parser.add_argument("--database-id", required=True); prepare_parser.add_argument("--version"); prepare_parser.add_argument("--database", default="benchmark"); prepare_parser.add_argument("--install-root", type=Path); prepare_parser.add_argument("--database-root", type=Path)
+    copy_parser = sub.add_parser("copy"); copy_parser.add_argument("--source-database-id", required=True); copy_parser.add_argument("--database-id", required=True); copy_parser.add_argument("--version", required=True); copy_parser.add_argument("--install-root", type=Path); copy_parser.add_argument("--database-root", type=Path)
     list_parser = sub.add_parser("list"); list_parser.add_argument("--database-root", type=Path)
     inspect_parser = sub.add_parser("inspect"); inspect_parser.add_argument("--database-id", required=True); inspect_parser.add_argument("--database-root", type=Path)
     verify_parser = sub.add_parser("verify"); verify_parser.add_argument("--database-id", required=True); verify_parser.add_argument("--database-root", type=Path)
@@ -369,6 +465,8 @@ def validate_args(args: argparse.Namespace) -> None:
         normalize_version(args.version)
     if hasattr(args, "database_id") and not ID_RE.fullmatch(args.database_id):
         raise SetupError("--database-id contains invalid characters")
+    if hasattr(args, "source_database_id") and not ID_RE.fullmatch(args.source_database_id):
+        raise SetupError("--source-database-id contains invalid characters")
     if hasattr(args, "database") and (not args.database or "\x00" in args.database):
         raise SetupError("--database must not be empty or contain NUL")
 
@@ -377,12 +475,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = make_parser().parse_args(argv)
     try:
         validate_args(args)
-        if args.command in ("install", "prepare"):
+        if args.command in ("install", "prepare", "copy"):
             resolve_args_version(args)
         if args.command == "install":
             value = install(args)
         elif args.command == "prepare":
             value = prepare(args)
+        elif args.command == "copy":
+            value = copy_database(args)
         elif args.command in ("inspect", "verify"):
             path = database_path(args); value = {**validate_database(path, args.database_id), "database_path": str(path)}
         else:
