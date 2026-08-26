@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import gzip
 import hashlib
 import json
 import os
@@ -15,6 +16,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -26,7 +28,9 @@ SCRIPT_PATH = Path(__file__).resolve()
 sys.path.insert(0, str(SCRIPT_PATH.parents[3] / "lib"))
 
 from tsbs_benchmark import (  # noqa: E402
+    FIXED_HOST_QUERY_TYPES,
     PROFILES,
+    QUERY_SCOPES,
     QUERY_TYPES,
     add_one_second,
     build_workload,
@@ -92,6 +96,7 @@ def validate_run_manifest(manifest: dict[str, Any], path: Path) -> None:
     workload_fields = ("start", "end", "scale", "seed", "log_interval", "load_workers", "query_workers", "batch_size", "query_counts")
     if not all(field in workload for field in workload_fields) or not isinstance(workload["query_counts"], dict):
         raise BenchmarkError(f"malformed run workload: {path}")
+    workload.setdefault("query_scope", "full")
 
 
 def save_manifest(run_dir: Path, manifest: dict[str, Any]) -> None:
@@ -118,7 +123,7 @@ def prepare_run(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     if manifest_path.exists():
         manifest = read_json(manifest_path)
         validate_run_manifest(manifest, manifest_path)
-        workload_options = ("profile", "start", "end", "scale", "seed", "log_interval", "load_workers", "query_workers", "batch_size", "queries", "query_type", "query_count")
+        workload_options = ("profile", "start", "end", "scale", "seed", "log_interval", "load_workers", "query_workers", "batch_size", "queries", "query_type", "query_count", "query_scope")
         if any(getattr(args, name, None) is not None for name in workload_options):
             requested = build_workload(
                 args,
@@ -136,14 +141,22 @@ def prepare_run(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         manifest = {
             "schema_version": SCHEMA_VERSION, "kind": "influxdb3-run", "run_id": run_dir.name,
             "created_at": utc_now(), "profile": profile, "database": getattr(args, "database", DEFAULT_DATABASE),
-            "workload": build_workload(
+            "compression": args.compression or "none", "workload": build_workload(
                 args,
                 defaults=MANUAL_LOAD_DEFAULTS if profile == "manual" else None,
             ),
             "events": {"loads": [], "queries": [], "servers": []},
         }
+    manifest.setdefault("compression", "none")
+    if args.compression is not None and args.compression != manifest["compression"]:
+        raise BenchmarkError("--compression conflicts with the compression pinned by this run")
     if hasattr(args, "database") and manifest.get("database") != args.database and manifest_path.exists():
         raise BenchmarkError("--database conflicts with the database pinned by this run")
+    if manifest["workload"]["scale"] >= 10_000 and manifest["workload"]["query_scope"] == "full":
+        print(
+            f"warning: workload has {manifest['workload']['scale']:,} hosts; consider --query-scope fixed-host",
+            file=sys.stderr,
+        )
     save_manifest(run_dir, manifest)
     return run_dir, manifest
 
@@ -157,17 +170,47 @@ def display_command(command: Sequence[str]) -> str:
     return " ".join(subprocess.list2cmdline([part]) for part in redacted)
 
 
-def run_tee(command: Sequence[str], log_path: Path, *, stdout_path: Path | None = None, append: bool = False) -> None:
+def run_tee(
+    command: Sequence[str],
+    log_path: Path,
+    *,
+    stdout_path: Path | None = None,
+    append: bool = False,
+    stdin_path: Path | None = None,
+    stdin_compression: str = "none",
+) -> None:
     mode = "a" if append else "w"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open(mode, encoding="utf-8") as log:
         header = f"$ {display_command(command)}\n"
         write_streams(header, sys.stdout, log)
         if stdout_path is None:
-            process = subprocess.Popen(command, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            process = subprocess.Popen(command, cwd=REPO_ROOT, stdin=subprocess.PIPE if stdin_path else None, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            pump_errors: list[Exception] = []
+            pump = None
+            if stdin_path:
+                assert process.stdin is not None
+                def pump_input() -> None:
+                    try:
+                        opener = gzip.open if stdin_compression == "gzip" else open
+                        with opener(stdin_path, "rb") as source:
+                            shutil.copyfileobj(source, process.stdin.buffer, length=1024 * 1024)
+                    except Exception as exc:
+                        pump_errors.append(exc)
+                    finally:
+                        try:
+                            process.stdin.close()
+                        except (BrokenPipeError, OSError) as exc:
+                            if not pump_errors:
+                                pump_errors.append(exc)
+                pump = threading.Thread(target=pump_input, daemon=True); pump.start()
             assert process.stdout is not None
             tee_stream(process.stdout, sys.stdout, log)
             process.stdout.close(); return_code = process.wait()
+            if pump:
+                pump.join()
+            if pump_errors and return_code == 0:
+                raise BenchmarkError(f"failed to stream dataset input: {pump_errors[0]}")
         else:
             stdout_path.parent.mkdir(parents=True, exist_ok=True)
             temporary_output = stdout_path.with_name(stdout_path.name + ".tmp")
@@ -234,7 +277,7 @@ def prepare_dataset(args: argparse.Namespace, run_dir: Path, manifest: dict[str,
     result_path = run_dir / "results" / ("dataset.json" if materialize else "logical-dataset.json")
     command = [sys.executable, str(DATASET_RUNNER), "generate" if materialize else "prepare"]
     if materialize:
-        command.extend(["--format", "influx"])
+        command.extend(["--format", "influx", "--compression", manifest["compression"]])
     command.extend(["--use-case", "cpu-only", "--result-file", str(result_path), *dataset_selection_args(args, manifest)])
     if not manifest.get("dataset"):
         command.extend(["--seed", str(workload["seed"]), "--scale", str(workload["scale"]), "--start", workload["start"], "--end", workload["end"], "--log-interval", workload["log_interval"]])
@@ -462,8 +505,9 @@ def load_data(args: argparse.Namespace, run_dir: Path, manifest: dict[str, Any],
     event = {"attempt": attempt, "database": args.database, "database_mode": mode, "dataset_id": dataset["dataset_id"], "log": relative(run_dir, log_path), "status": "running", "started_at": utc_now()}
     manifest["events"]["loads"].append(event); save_manifest(run_dir, manifest)
     workload = manifest["workload"]
-    command = [str(REPO_ROOT / "bin" / BINARIES["load"]), f"--urls={endpoint}", f"--file={input_path}", f"--db-name={args.database}", f"--batch-size={workload['batch_size']}", "--gzip=false", f"--workers={workload['load_workers']}", "--reporting-period=10s", f"--results-file={result_path}", f"--no-sync={str(args.no_sync).lower()}", f"--accept-partial={str(args.accept_partial).lower()}", *credential_args(args, include_admin=True), *database_mode_args(mode, args.database, args.confirm_reset)]
-    try: run_tee(command, log_path)
+    input_args = [] if dataset.get("compression") == "gzip" else [f"--file={input_path}"]
+    command = [str(REPO_ROOT / "bin" / BINARIES["load"]), f"--urls={endpoint}", *input_args, f"--db-name={args.database}", f"--batch-size={workload['batch_size']}", "--gzip=false", f"--workers={workload['load_workers']}", "--reporting-period=10s", f"--results-file={result_path}", f"--no-sync={str(args.no_sync).lower()}", f"--accept-partial={str(args.accept_partial).lower()}", *credential_args(args, include_admin=True), *database_mode_args(mode, args.database, args.confirm_reset)]
+    try: run_tee(command, log_path, stdin_path=input_path if dataset.get("compression") == "gzip" else None, stdin_compression=dataset.get("compression", "none"))
     except Exception:
         event.update(status="failed", finished_at=utc_now()); save_manifest(run_dir, manifest); raise
     event.update(status="completed", finished_at=utc_now(), results=relative(run_dir, result_path)); save_manifest(run_dir, manifest)
@@ -620,7 +664,7 @@ def add_run_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--profile", choices=sorted(PROFILES)); parser.add_argument("--start"); parser.add_argument("--end"); parser.add_argument("--scale", type=int); parser.add_argument("--seed", type=int); parser.add_argument("--log-interval")
     parser.add_argument("--load-workers", type=int); parser.add_argument("--query-workers", type=int); parser.add_argument("--batch-size", type=int); parser.add_argument("--queries", type=int, help="default count for every selected query type")
     parser.add_argument("--query-count", action="append", type=parse_query_count, metavar="QUERY_TYPE=COUNT", help="count for one query type; repeat for different counts")
-    parser.add_argument("--query-type", action="append", choices=QUERY_TYPES); parser.add_argument("--query-root", type=Path); parser.add_argument("--regenerate", action="store_true"); parser.add_argument("--rebuild", action="store_true"); parser.add_argument("--dataset-root", type=Path)
+    parser.add_argument("--query-type", action="append", choices=QUERY_TYPES); parser.add_argument("--query-scope", choices=QUERY_SCOPES); parser.add_argument("--query-root", type=Path); parser.add_argument("--compression", choices=("none", "gzip")); parser.add_argument("--regenerate", action="store_true"); parser.add_argument("--rebuild", action="store_true"); parser.add_argument("--dataset-root", type=Path)
     dataset = parser.add_mutually_exclusive_group(); dataset.add_argument("--dataset-id"); dataset.add_argument("--dataset-path", type=Path)
 
 
@@ -700,7 +744,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.command in ("load", "all"): load_data(args, run_dir, manifest, endpoint, managed, database_manifest, database_path)
                 if args.command in ("query", "all"): run_queries(args, run_dir, manifest, endpoint, database_manifest)
         summary = write_summary(run_dir, manifest); print(f"Run directory: {run_dir}"); print(f"Summary: {run_dir / 'summary.md'}"); return 1 if summary["failures"] else 0
-    except (BenchmarkError, TsbsEnvironmentError, OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (BenchmarkError, TsbsEnvironmentError, OSError, ValueError, json.JSONDecodeError, KeyError, TypeError) as exc:
         if run_dir is not None and manifest is not None:
             try: write_summary(run_dir, manifest)
             except OSError: pass

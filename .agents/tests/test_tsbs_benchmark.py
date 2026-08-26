@@ -50,6 +50,7 @@ class WorkloadTests(unittest.TestCase):
             "queries": None,
             "query_type": None,
             "query_count": None,
+            "query_scope": None,
         }
         values.update(overrides)
         return argparse.Namespace(**values)
@@ -95,7 +96,6 @@ class WorkloadTests(unittest.TestCase):
                 query_count=[("lastpoint", 7), ("cpu-max-all-1", 23)],
             )
         )
-
         self.assertEqual(
             workload["query_counts"],
             {
@@ -104,6 +104,18 @@ class WorkloadTests(unittest.TestCase):
                 "lastpoint": 7,
             },
         )
+
+    def test_fixed_host_scope_selects_only_bounded_queries(self) -> None:
+        workload = shared.build_workload(self.args(query_scope="fixed-host"))
+
+        self.assertEqual(tuple(workload["query_counts"]), tuple(sorted(shared.FIXED_HOST_QUERY_TYPES)))
+        self.assertEqual(workload["query_scope"], "fixed-host")
+
+    def test_fixed_host_scope_rejects_all_host_query(self) -> None:
+        with self.assertRaisesRegex(ValueError, "outside the fixed-host scope"):
+            shared.build_workload(
+                self.args(query_scope="fixed-host", query_type=["lastpoint"])
+            )
 
     def test_per_type_count_must_match_explicit_membership(self) -> None:
         with self.assertRaisesRegex(ValueError, "not selected"):

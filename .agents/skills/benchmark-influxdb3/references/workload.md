@@ -16,6 +16,11 @@ Both Core and Enterprise consume the same `influx` line-protocol dataset and
 native InfluxDB 3 SQL query set. Reuse identical artifacts, query order,
 workers, batch sizes, and durability flags for comparisons.
 
+Compression is a run-pinned storage variant rather than logical dataset
+identity. Plain and gzip artifacts coexist, while canonical uncompressed size
+and SHA-256 keep bindings equivalent. Gzip is streamed into the loader without
+a temporary plain file.
+
 ## Profiles
 
 | Setting | `manual` (default) | `smoke` |
@@ -36,6 +41,12 @@ every selected type, and repeatable `--query-count TYPE=N` entries override
 individual counts. Without `--query-type`, per-type entries define query-set
 membership; with `--query-type`, every override must target a selected type.
 The resolved type-to-count mapping is part of the immutable query-set identity.
+
+`--query-scope full` is the default. `fixed-host` permits
+`cpu-max-all-{1,8}`, `high-cpu-1`, and the six `single-groupby-*` types; explicit
+types or counts outside the scope are rejected. Recommend this explicit scope
+at 10,000 hosts or more. Recommend gzip at 50 million estimated `cpu-only`
+points, calculated as `scale × floor(duration / interval)`.
 
 The manual load settings are InfluxDB-specific overrides selected by
 `docs/influx3-ingestion-benchmark.md`; shared TSBS and GreptimeDB profile

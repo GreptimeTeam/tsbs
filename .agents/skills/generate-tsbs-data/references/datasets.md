@@ -5,8 +5,8 @@
 ```text
 .benchmarks/datasets/<dataset-id>/
 ├── dataset.json
-└── formats/<format>/
-    ├── data
+└── formats/<format>/<compression>/
+    ├── data[.gz]
     ├── generate.log
     └── manifest.json
 ```
@@ -16,8 +16,11 @@ Only `dataset.json` is required. Metadata-only preparation deliberately leaves
 serialization format. Its canonical specification contains `use_case`,
 `seed`, `scale`, `start`, `end`, and `log_interval`.
 
-Each format directory contains one serialization and records status, byte
-size, SHA-256, generator binary checksum, Git revision, and timestamps.
+Each format/compression directory contains one serialization and records
+status, compression, canonical uncompressed size/SHA-256, stored artifact
+size/SHA-256, generator binary checksum, Git revision, and timestamps. Schema-v1
+artifacts directly under `formats/<format>/` remain valid legacy `none`
+variants.
 
 ## Profiles
 
@@ -44,3 +47,9 @@ the same logical dataset ID.
 - Publish a replacement payload only after successful generation.
 - Preserve the completed artifact when regeneration fails.
 - Keep cached data outside Git; `.benchmarks/` is ignored.
+- Compression does not affect logical dataset identity. `none` is the default;
+  `gzip` is deterministic and coexists with the plain variant.
+- For `cpu-only`, estimated points equal
+  `scale × floor((end - start) / log_interval)`. Recommend gzip from 50 million
+  points. A 100-host, one-hour Influx sample measured about 344 bytes/point
+  plain and 36 bytes/point compressed; actual formats and values vary.

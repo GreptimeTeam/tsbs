@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import gzip
 import json
+import shutil
 import stat
 import sys
 import tempfile
@@ -76,6 +78,10 @@ class DatasetIdentityTests(unittest.TestCase):
             selected = generate.resolve_dataset_path(second, generate.logical_spec(second))
             self.assertTrue((selected / "dataset.json").is_file())
 
+    def test_cpu_only_point_estimate(self) -> None:
+        spec = dict(generate.PROFILES["smoke"])
+        self.assertEqual(generate.estimated_points(spec), 10 * 24 * 60 * 6)
+
 
 class DatasetVariantTests(unittest.TestCase):
     def make_generator(self, root: Path, body: str) -> Path:
@@ -109,6 +115,47 @@ class DatasetVariantTests(unittest.TestCase):
             self.assertFalse(influx["reused"])
             self.assertTrue(reused["reused"])
             self.assertNotEqual(influx["sha256"], timescale["sha256"])
+
+    def test_plain_and_gzip_variants_coexist_with_same_content_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake = self.make_generator(root, "print('valid payload')\n")
+            dataset_dir, manifest = self.prepare(root)
+            with mock.patch.object(generate, "GENERATOR", fake):
+                plain = generate.generate_variant(dataset_dir, manifest, "influx", compression="none", regenerate=False, rebuild=False)
+                compressed = generate.generate_variant(dataset_dir, manifest, "influx", compression="gzip", regenerate=False, rebuild=False)
+            self.assertEqual(plain["sha256"], compressed["sha256"])
+            self.assertEqual(plain["bytes"], compressed["bytes"])
+            self.assertNotEqual(plain["data_path"], compressed["data_path"])
+            self.assertTrue(Path(plain["data_path"]).is_file())
+            with gzip.open(compressed["data_path"], "rt", encoding="utf-8") as stream:
+                self.assertEqual(stream.read(), "valid payload\n")
+
+    def test_gzip_output_is_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake = self.make_generator(root, "print('valid payload')\n")
+            dataset_dir, manifest = self.prepare(root)
+            with mock.patch.object(generate, "GENERATOR", fake):
+                first = generate.generate_variant(dataset_dir, manifest, "influx", compression="gzip", regenerate=False, rebuild=False)
+                second = generate.generate_variant(dataset_dir, manifest, "influx", compression="gzip", regenerate=True, rebuild=False)
+            self.assertEqual(first["artifact_sha256"], second["artifact_sha256"])
+
+    def test_legacy_plain_variant_is_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake = self.make_generator(root, "print('valid')\n")
+            dataset_dir, manifest = self.prepare(root)
+            with mock.patch.object(generate, "GENERATOR", fake):
+                generated = generate.generate_variant(dataset_dir, manifest, "influx", regenerate=False, rebuild=False)
+                nested = Path(generated["data_path"]).parent
+                legacy = dataset_dir / "formats" / "influx"
+                for child in nested.iterdir():
+                    shutil.move(str(child), legacy / child.name)
+                nested.rmdir()
+                reused = generate.generate_variant(dataset_dir, manifest, "influx", regenerate=False, rebuild=False)
+            self.assertTrue(reused["reused"])
+            self.assertEqual(Path(reused["data_path"]).parent, legacy)
 
     def test_reuse_skips_checksum_verification(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -166,6 +213,28 @@ class DatasetVariantTests(unittest.TestCase):
             with self.assertRaisesRegex(generate.DatasetError, "checksum mismatch"):
                 generate.verify_dataset(verify_args)
 
+    def test_verify_checks_decompressed_content_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake = self.make_generator(root, "print('valid')\n")
+            dataset_dir, manifest = self.prepare(root)
+            with mock.patch.object(generate, "GENERATOR", fake):
+                result = generate.generate_variant(dataset_dir, manifest, "influx", compression="gzip", regenerate=False, rebuild=False)
+            artifact = Path(result["data_path"])
+            with artifact.open("wb") as raw:
+                with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as stream:
+                    stream.write(b"other\n")
+            manifest_path = artifact.parent / "manifest.json"
+            variant = json.loads(manifest_path.read_text(encoding="utf-8"))
+            variant["artifact_bytes"] = artifact.stat().st_size
+            variant["artifact_sha256"] = generate.sha256_file(artifact)
+            manifest_path.write_text(json.dumps(variant), encoding="utf-8")
+            verify_args = generate.make_parser().parse_args([
+                "verify", "--dataset-path", str(dataset_dir), "--format", "influx", "--compression", "gzip",
+            ])
+            with self.assertRaisesRegex(generate.DatasetError, "content checksum mismatch"):
+                generate.verify_dataset(verify_args)
+
     def test_failed_regeneration_preserves_completed_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -192,7 +261,7 @@ class DatasetVariantTests(unittest.TestCase):
             with mock.patch.object(generate, "GENERATOR", bad):
                 with self.assertRaises(generate.DatasetError):
                     generate.generate_variant(dataset_dir, manifest, "influx", regenerate=False, rebuild=False)
-            manifest_path = dataset_dir / "formats" / "influx" / "manifest.json"
+            manifest_path = dataset_dir / "formats" / "influx" / "none" / "manifest.json"
             failed = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(failed["status"], "failed")
 

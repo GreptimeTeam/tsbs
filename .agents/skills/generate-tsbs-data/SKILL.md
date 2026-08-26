@@ -31,6 +31,10 @@ python3 .agents/skills/generate-tsbs-data/scripts/generate.py generate \
 
 python3 .agents/skills/generate-tsbs-data/scripts/generate.py generate \
   --profile manual --format timescaledb --dataset-root /shared/tsbs-data
+
+python3 .agents/skills/generate-tsbs-data/scripts/generate.py generate \
+  --scale 1000000 --start 2023-06-11T00:00:00Z \
+  --end 2023-06-11T00:10:00Z --format influx --compression gzip
 ```
 
 The default root is `.benchmarks/datasets`. Set `TSBS_DATASET_ROOT` or pass
@@ -40,6 +44,12 @@ overrides conflict. Pass `--regenerate` only to intentionally replace a format
 variant and `--rebuild` only to rebuild the generator. Reuse validates the
 manifest, completion status, artifact presence, and byte size without rereading
 the complete artifact to recompute its checksum.
+
+Compression is opt-in: `--compression none` is the default and
+`--compression gzip` writes a deterministic gzip stream without first storing
+plain data. Plain and gzip variants coexist. For `cpu-only`, calculate points as
+`hosts × floor(duration / interval)` and recommend gzip at 50 million points or
+more. Report the estimate before generating when a choice is still needed.
 
 ## Inspect and verify
 
@@ -52,7 +62,8 @@ python3 .agents/skills/generate-tsbs-data/scripts/generate.py verify \
 
 Use `--json` or `--result-file` for machine-readable output. Report the
 dataset ID and specification; for materialized variants also report format,
-data path, byte size, and recorded SHA-256. The `verify` command explicitly
-recomputes the artifact checksum and should be used when full cache integrity
-validation is required. Database-specific query generation belongs to the
-corresponding benchmark skill.
+compression, data path, estimated points, canonical content size/SHA-256, and
+stored artifact size/SHA-256. The `verify` command explicitly recomputes both
+the artifact and decompressed-content checksums and should be used when full
+cache integrity validation is required. Database-specific query generation
+belongs to the corresponding benchmark skill.

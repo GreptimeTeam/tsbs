@@ -193,6 +193,23 @@ class WorkspaceTests(unittest.TestCase):
             {"cpu-max-all-1": 23, "lastpoint": 7},
         )
 
+    def test_compression_and_fixed_host_scope_are_pinned(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = benchmark.make_parser()
+            initial = parser.parse_args([
+                "generate", "--run-root", temp, "--only", "queries",
+                "--compression", "gzip", "--query-scope", "fixed-host",
+            ])
+            run_dir, manifest = benchmark.prepare_run(initial)
+            self.assertEqual(manifest["compression"], "gzip")
+            self.assertEqual(set(manifest["workload"]["query_counts"]), set(benchmark.FIXED_HOST_QUERY_TYPES))
+            changed = parser.parse_args([
+                "generate", "--run-dir", str(run_dir), "--only", "queries",
+                "--compression", "none",
+            ])
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "compression pinned"):
+                benchmark.prepare_run(changed)
+
     def test_old_or_malformed_run_manifest_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             run_dir = Path(temp)
@@ -369,6 +386,20 @@ class ManagedDatabaseTests(unittest.TestCase):
         benchmark.resolve_database(args)
         with self.assertRaisesRegex(benchmark.BenchmarkError, "exactly one"):
             benchmark.validate_args(args)
+
+    def test_gzip_dataset_is_streamed_to_loader_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.prepare_database(root); args = self.args(root); path, db = benchmark.prepare_database_workspace(args)
+            input_path = root / "data.gz"; input_path.write_bytes(b"gzip")
+            dataset = {"dataset_id": "a", "dataset_path": "/a", "data_path": str(input_path), "format": "influx", "compression": "gzip", "bytes": 1, "sha256": "a", "spec": {"use_case": "cpu-only"}}
+            run_dir = root / "run"; (run_dir / "logs").mkdir(parents=True); (run_dir / "results").mkdir()
+            manifest = {"workload": {"batch_size": 1, "load_workers": 1}, "events": {"loads": [], "queries": []}, "dataset": dataset}
+            with mock.patch.object(benchmark, "generate_data", return_value=input_path), mock.patch.object(benchmark, "ensure_binaries"), mock.patch.object(benchmark, "run_tee") as runner:
+                benchmark.load_data(args, run_dir, manifest, "http://localhost", True, db, path)
+            command = runner.call_args.args[0]
+            self.assertFalse(any(part.startswith("--file=") for part in command))
+            self.assertEqual(runner.call_args.kwargs["stdin_path"], input_path)
+            self.assertEqual(runner.call_args.kwargs["stdin_compression"], "gzip")
 
     def test_failed_preflight_does_not_bind_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -40,6 +40,11 @@ python3 .agents/skills/benchmark-influxdb3/scripts/benchmark.py all \
   --profile smoke --url http://127.0.0.1:8181 --edition enterprise \
   --database-mode create
 
+python3 .agents/skills/benchmark-influxdb3/scripts/benchmark.py generate \
+  --only all --scale 2000000 --start 2023-06-11T00:00:00Z \
+  --end 2023-06-11T00:05:00Z --compression gzip \
+  --query-scope fixed-host
+
 python3 .agents/skills/benchmark-influxdb3/scripts/benchmark.py query \
   --profile smoke --url http://127.0.0.1:8181 --edition core \
   --query-count cpu-max-all-1=100 --query-count lastpoint=10
@@ -48,14 +53,22 @@ python3 .agents/skills/benchmark-influxdb3/scripts/benchmark.py summarize \
   --run-dir .benchmarks/influxdb3/runs/RUN_ID
 ```
 
-Repeat `--query-type` to define membership; omit it for every supported type.
-`--queries=N` supplies a default count for selected types, while repeatable
+Repeat `--query-type` to define membership; omit it for every type allowed by
+`--query-scope full|fixed-host` (default `full`). The fixed-host scope keeps
+the 1/8-host CPU maximum and single-groupby queries plus `high-cpu-1`, and
+rejects all-host selections. Recommend it at 10,000 hosts or more, while
+requiring the explicit flag. `--queries=N` supplies a default count for
+selected types, while repeatable
 `--query-count TYPE=N` entries override individual counts. Without
 `--query-type`, per-type entries define membership; with it, overrides must
 name selected types. Each immutable query file executes once per run.
 Query-only commands prepare logical dataset metadata without generating data.
 Shared query sets are reused only after exact manifest, membership, size, and
 checksum validation.
+Data compression is opt-in with `--compression gzip`; plain remains the
+default and compression is pinned by the run. Recommend gzip at 50 million
+estimated `cpu-only` points. The loader consumes gzip through streaming
+decompression without creating a temporary plain dataset.
 Managed servers may take several minutes to initialize, so the runner waits up
 to 10 minutes by default. Override this with `--startup-timeout SECONDS` when a
 different allowance is required.

@@ -40,6 +40,11 @@ python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py generate \
   --run-root .benchmarks/greptimedb/runs \
   --query-root .benchmarks/queries
 
+python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py generate \
+  --only all --scale 1000000 --start 2023-06-11T00:00:00Z \
+  --end 2023-06-11T00:10:00Z --compression gzip \
+  --query-scope fixed-host
+
 python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py query \
   --profile smoke --endpoint http://127.0.0.1:4000 --database benchmark \
   --query-count cpu-max-all-1=100 --query-count lastpoint=10
@@ -59,8 +64,12 @@ python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py summarize \
   --run-dir .benchmarks/greptimedb/runs/RUN_ID
 ```
 
-Repeat `--query-type` to define query-set membership; omit it for every
-supported type. `--queries=N` assigns a default count to every selected type.
+Repeat `--query-type` to define query-set membership; omit it for every type
+allowed by `--query-scope full|fixed-host` (default `full`). The fixed-host
+scope keeps the 1/8-host CPU maximum and single-groupby queries plus
+`high-cpu-1`, and rejects all-host selections. Recommend it at 10,000 hosts or
+more, but require the explicit flag. `--queries=N` assigns a default count to
+every selected type.
 Repeat `--query-count TYPE=N` to override individual counts; without
 `--query-type`, those entries also define membership. With both flags, every
 per-type override must name a selected type. Resolved counts are part of the
@@ -107,6 +116,11 @@ Query and analysis commands prepare logical dataset metadata without generating 
 Use `--dataset-id` or `--dataset-path` to pin a dataset. Shared query sets live
 under `--query-root` and are reused only after exact manifest, membership,
 size, and checksum validation.
+
+Data compression is opt-in with `--compression gzip`; plain remains the
+default and compression is pinned by the run. Recommend gzip when the
+`cpu-only` estimate reaches 50 million points. Compressed data is decompressed
+directly into the loader without a temporary plain file.
 
 ## Protect databases
 

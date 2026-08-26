@@ -36,6 +36,18 @@ QUERY_COUNTS_MANUAL = {
     "single-groupby-5-8-1": 100,
 }
 QUERY_TYPES = tuple(QUERY_COUNTS_MANUAL)
+FIXED_HOST_QUERY_TYPES = (
+    "cpu-max-all-1",
+    "cpu-max-all-8",
+    "high-cpu-1",
+    "single-groupby-1-1-1",
+    "single-groupby-1-1-12",
+    "single-groupby-1-8-1",
+    "single-groupby-5-1-1",
+    "single-groupby-5-1-12",
+    "single-groupby-5-8-1",
+)
+QUERY_SCOPES = ("full", "fixed-host")
 PROFILES = {
     "manual": {
         "start": "2023-06-11T00:00:00Z",
@@ -206,6 +218,10 @@ def build_workload(
         if value is not None:
             workload[attr] = value
     overrides = query_count_overrides(getattr(args, "query_count", None))
+    query_scope = getattr(args, "query_scope", None) or workload.get("query_scope", "full")
+    if query_scope not in QUERY_SCOPES:
+        raise ValueError(f"unsupported query scope: {query_scope}")
+    allowed = set(QUERY_TYPES if query_scope == "full" else FIXED_HOST_QUERY_TYPES)
     if args.query_type:
         selected = sorted(set(args.query_type))
         unselected = sorted(set(overrides) - set(selected))
@@ -217,7 +233,12 @@ def build_workload(
     elif overrides:
         selected = sorted(overrides)
     else:
-        selected = sorted(workload["query_counts"])
+        selected = sorted(set(workload["query_counts"]) & allowed)
+    disallowed = sorted(set(selected) - allowed)
+    if disallowed:
+        raise ValueError(
+            f"query types are outside the {query_scope} scope: " + ", ".join(disallowed)
+        )
     count_override = getattr(args, "queries", None)
     workload["query_counts"] = {
         query_type: overrides[query_type]
@@ -227,6 +248,7 @@ def build_workload(
         else workload["query_counts"][query_type]
         for query_type in selected
     }
+    workload["query_scope"] = query_scope
     return workload
 
 

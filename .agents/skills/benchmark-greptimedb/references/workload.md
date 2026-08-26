@@ -25,6 +25,11 @@ query-type-to-count map. A subset is a complete set with only those files.
 Generation publishes the directory atomically; generator commands and stderr
 remain in the initiating run rather than the shared set.
 
+Dataset compression is a run-pinned storage variant, not part of logical
+dataset identity. Plain and gzip artifacts can coexist; canonical uncompressed
+size and SHA-256 keep database bindings and comparisons independent of storage
+compression.
+
 ## Profiles
 
 Both profiles use seed `123`, interval `10s`, data use case `cpu-only`, query
@@ -64,6 +69,12 @@ precedence for individual types. If `--query-count` is used without
 `--query-type`, only the named types belong to the query set. If
 `--query-type` is present, it defines membership and every per-type override
 must target one of those types.
+
+`--query-scope full` is the default. `fixed-host` permits
+`cpu-max-all-{1,8}`, `high-cpu-1`, and the six `single-groupby-*` types; explicit
+types or counts outside the scope are rejected. Recommend this explicit scope
+at 10,000 hosts or more. Recommend gzip at 50 million estimated `cpu-only`
+points, where points are `scale × floor(duration / interval)`.
 
 | Query type | Manual | Smoke |
 | --- | ---: | ---: |

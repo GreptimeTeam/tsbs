@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import gzip
 import json
 import sys
 import tempfile
@@ -16,6 +17,21 @@ sys.path.insert(0, str(SCRIPTS))
 import benchmark  # noqa: E402
 import compare as version_compare  # noqa: E402
 import summarize  # noqa: E402
+
+
+class StreamingInputTests(unittest.TestCase):
+    def test_run_tee_decompresses_gzip_to_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); data = root / "data.gz"; log = root / "load.log"
+            with gzip.open(data, "wb") as stream:
+                stream.write(b"alpha\nbeta\n")
+            benchmark.run_tee(
+                [sys.executable, "-c", "import sys; print(len(sys.stdin.readlines()))"],
+                log,
+                stdin_path=data,
+                stdin_compression="gzip",
+            )
+            self.assertIn("2", log.read_text(encoding="utf-8"))
 
 
 class SummaryIntegrationTests(unittest.TestCase):
@@ -181,6 +197,23 @@ class WorkspaceTests(unittest.TestCase):
             ])
 
             with self.assertRaisesRegex(benchmark.BenchmarkError, "immutable"):
+                benchmark.prepare_run(changed)
+
+    def test_compression_and_fixed_host_scope_are_pinned(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = benchmark.make_parser()
+            initial = parser.parse_args([
+                "generate", "--run-root", temp, "--only", "queries",
+                "--compression", "gzip", "--query-scope", "fixed-host",
+            ])
+            run_dir, manifest = benchmark.prepare_run(initial)
+            self.assertEqual(manifest["compression"], "gzip")
+            self.assertEqual(set(manifest["workload"]["query_counts"]), set(benchmark.FIXED_HOST_QUERY_TYPES))
+            changed = parser.parse_args([
+                "generate", "--run-dir", str(run_dir), "--only", "queries",
+                "--compression", "none",
+            ])
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "compression pinned"):
                 benchmark.prepare_run(changed)
 
 
@@ -568,6 +601,20 @@ class ManagedDatabaseTests(unittest.TestCase):
         benchmark.resolve_database(args)
         with self.assertRaisesRegex(benchmark.BenchmarkError, "database-id"):
             benchmark.validate_args(args)
+
+    def test_gzip_dataset_is_streamed_to_loader_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); args = self.args(root); path, db = benchmark.prepare_database_workspace(args)
+            input_path = root / "data.gz"; input_path.write_bytes(b"gzip")
+            dataset = {"dataset_id": "a", "dataset_path": "/a", "data_path": str(input_path), "format": "influx", "compression": "gzip", "bytes": 1, "sha256": "a", "spec": {"use_case": "cpu-only"}}
+            run_dir = root / "run"; (run_dir / "logs").mkdir(parents=True); (run_dir / "results").mkdir()
+            manifest = {"workload": {"batch_size": 1, "load_workers": 1}, "events": {"loads": [], "queries": []}, "dataset": dataset}
+            with mock.patch.object(benchmark, "generate_data", return_value=input_path), mock.patch.object(benchmark, "ensure_binaries"), mock.patch.object(benchmark, "run_tee") as runner:
+                benchmark.load_data(args, run_dir, manifest, "http://localhost", True, db, path)
+            command = runner.call_args.args[0]
+            self.assertFalse(any(part.startswith("--file=") for part in command))
+            self.assertEqual(runner.call_args.kwargs["stdin_path"], input_path)
+            self.assertEqual(runner.call_args.kwargs["stdin_compression"], "gzip")
 
     def test_prepared_workspace_discovers_and_validates_binary(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
