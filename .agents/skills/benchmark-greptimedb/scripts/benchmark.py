@@ -279,7 +279,8 @@ def prepare_dataset(args: argparse.Namespace, run_dir: Path, manifest: dict[str,
     result_path = run_dir / "results" / ("dataset.json" if materialize else "logical-dataset.json")
     command = [sys.executable, str(DATASET_RUNNER), "generate" if materialize else "prepare"]
     if materialize:
-        command.extend(["--format", "influx", "--compression", manifest["compression"]])
+        command.extend(["--format", "influx"])
+    command.extend(["--compression", manifest["compression"]])
     command.extend(["--use-case", "cpu-only", "--result-file", str(result_path), *dataset_selection_args(args, manifest)])
     if not manifest.get("dataset"):
         command.extend(["--seed", str(workload["seed"]), "--scale", str(workload["scale"]), "--start", workload["start"], "--end", workload["end"], "--log-interval", workload["log_interval"]])

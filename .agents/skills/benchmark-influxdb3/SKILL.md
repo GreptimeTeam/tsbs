@@ -66,9 +66,10 @@ Query-only commands prepare logical dataset metadata without generating data.
 Shared query sets are reused only after exact manifest, membership, size, and
 checksum validation.
 Data compression is opt-in with `--compression gzip`; plain remains the
-default and compression is pinned by the run. Recommend gzip at 50 million
-estimated `cpu-only` points. The loader consumes gzip through streaming
-decompression without creating a temporary plain dataset.
+default, compression is pinned by the run, and each compression has a distinct
+dataset identity. Recommend gzip at 50 million estimated `cpu-only` points. The
+loader consumes gzip through streaming decompression without creating a
+temporary plain dataset.
 Managed servers may take several minutes to initialize, so the runner waits up
 to 10 minutes by default. Override this with `--startup-timeout SECONDS` when a
 different allowance is required.

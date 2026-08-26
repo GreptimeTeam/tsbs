@@ -25,10 +25,9 @@ query-type-to-count map. A subset is a complete set with only those files.
 Generation publishes the directory atomically; generator commands and stderr
 remain in the initiating run rather than the shared set.
 
-Dataset compression is a run-pinned storage variant, not part of logical
-dataset identity. Plain and gzip artifacts can coexist; canonical uncompressed
-size and SHA-256 keep database bindings and comparisons independent of storage
-compression.
+Dataset compression is pinned by the run and is part of dataset identity.
+Plain and gzip artifacts use separate dataset directories; canonical
+uncompressed size and SHA-256 still describe the generated logical content.
 
 ## Profiles
 

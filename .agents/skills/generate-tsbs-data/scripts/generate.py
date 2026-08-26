@@ -170,8 +170,11 @@ def logical_spec(
     return spec
 
 
-def automatic_dataset_id(spec: dict[str, Any]) -> str:
-    digest = hashlib.sha256(canonical_json({"schema_version": SCHEMA_VERSION, "spec": spec}).encode()).hexdigest()
+def automatic_dataset_id(spec: dict[str, Any], compression: str = "none") -> str:
+    identity = {"schema_version": SCHEMA_VERSION, "spec": spec}
+    if compression != "none":
+        identity["compression"] = compression
+    digest = hashlib.sha256(canonical_json(identity).encode()).hexdigest()
     use_case = re.sub(r"[^a-z0-9]+", "-", str(spec["use_case"]).lower()).strip("-") or "data"
     return f"{use_case}-s{spec['scale']}-{digest[:12]}"
 
@@ -181,7 +184,11 @@ def dataset_root(args: argparse.Namespace) -> Path:
     return Path(configured).expanduser().resolve() if configured else DEFAULT_DATASET_ROOT
 
 
-def resolve_dataset_path(args: argparse.Namespace, spec: dict[str, Any] | None = None) -> Path:
+def resolve_dataset_path(
+    args: argparse.Namespace,
+    spec: dict[str, Any] | None = None,
+    compression: str = "none",
+) -> Path:
     if getattr(args, "dataset_path", None):
         return args.dataset_path.expanduser().resolve()
     dataset_id = getattr(args, "dataset_id", None)
@@ -189,7 +196,7 @@ def resolve_dataset_path(args: argparse.Namespace, spec: dict[str, Any] | None =
         if not ID_RE.fullmatch(dataset_id):
             raise DatasetError("--dataset-id may contain only letters, digits, '.', '_', and '-'")
     elif spec is not None:
-        dataset_id = automatic_dataset_id(spec)
+        dataset_id = automatic_dataset_id(spec, compression)
     else:
         raise DatasetError("provide --dataset-id or --dataset-path")
     return dataset_root(args) / dataset_id
@@ -206,20 +213,19 @@ def validate_dataset_manifest(dataset_dir: Path, expected_spec: dict[str, Any] |
         raise DatasetError(f"unsupported dataset schema in {dataset_dir / 'dataset.json'}")
     if not isinstance(manifest.get("spec"), dict):
         raise DatasetError(f"dataset manifest has no logical specification: {dataset_dir}")
+    if manifest.get("compression", "none") not in COMPRESSIONS:
+        raise DatasetError(f"unsupported dataset compression in {dataset_dir / 'dataset.json'}")
     if expected_spec is not None and manifest["spec"] != expected_spec:
         raise DatasetError(f"dataset settings do not match requested workload: {dataset_dir}")
     return manifest
 
 
-def new_variant_dir(dataset_dir: Path, format_name: str, compression: str) -> Path:
-    return dataset_dir / "formats" / format_name / compression
+def manifest_compression(manifest: dict[str, Any]) -> str:
+    return str(manifest.get("compression", "none"))
 
 
-def variant_candidates(dataset_dir: Path, format_name: str, compression: str) -> list[Path]:
-    candidates = [new_variant_dir(dataset_dir, format_name, compression)]
-    if compression == "none":
-        candidates.append(dataset_dir / "formats" / format_name)
-    return candidates
+def variant_dir(dataset_dir: Path, format_name: str) -> Path:
+    return dataset_dir / "formats" / format_name
 
 
 def validate_variant(
@@ -229,21 +235,18 @@ def validate_variant(
     *,
     verify_checksum: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
-    variant_dir = next(
-        (path for path in variant_candidates(dataset_dir, format_name, compression) if (path / "manifest.json").is_file()),
-        new_variant_dir(dataset_dir, format_name, compression),
-    )
-    manifest = read_json(variant_dir / "manifest.json")
+    path = variant_dir(dataset_dir, format_name)
+    manifest = read_json(path / "manifest.json")
     if manifest.get("schema_version") not in (SCHEMA_VERSION, VARIANT_SCHEMA_VERSION):
-        raise DatasetError(f"unsupported dataset format schema: {variant_dir / 'manifest.json'}")
+        raise DatasetError(f"unsupported dataset format schema: {path / 'manifest.json'}")
     if manifest.get("status") != "completed":
-        raise DatasetError(f"dataset format variant is not complete: {variant_dir}")
+        raise DatasetError(f"dataset format variant is not complete: {path}")
     if manifest.get("format") != format_name:
-        raise DatasetError(f"dataset format manifest mismatch: {variant_dir}")
+        raise DatasetError(f"dataset format manifest mismatch: {path}")
     recorded_compression = manifest.get("compression", "none")
     if recorded_compression != compression:
-        raise DatasetError(f"dataset compression manifest mismatch: {variant_dir}")
-    artifact = variant_dir / str(manifest.get("artifact", "data"))
+        raise DatasetError(f"dataset compression manifest mismatch: {path}")
+    artifact = path / str(manifest.get("artifact", "data"))
     if not artifact.is_file():
         raise DatasetError(f"missing dataset artifact: {artifact}")
     recorded_size = manifest.get("artifact_bytes", manifest.get("bytes"))
@@ -262,7 +265,7 @@ def validate_variant(
         or not isinstance(content_checksum, str)
         or re.fullmatch(r"[0-9a-f]{64}", content_checksum) is None
     ):
-        raise DatasetError(f"malformed dataset format manifest: {variant_dir}")
+        raise DatasetError(f"malformed dataset format manifest: {path}")
     actual_size = artifact.stat().st_size
     if actual_size != recorded_size:
         raise DatasetError(f"dataset artifact size mismatch: {artifact}")
@@ -280,7 +283,7 @@ def validate_variant(
             raise DatasetError(f"invalid gzip dataset artifact: {artifact}") from exc
         if content_bytes != manifest.get("bytes") or content_digest.hexdigest() != manifest.get("sha256"):
             raise DatasetError(f"dataset content checksum mismatch: {artifact}")
-    return variant_dir, manifest
+    return path, manifest
 
 
 def command_text(command: Sequence[str]) -> str:
@@ -350,16 +353,17 @@ def generate_variant(
     validate_format(format_name)
     if compression not in COMPRESSIONS:
         raise DatasetError(f"unsupported compression: {compression}")
-    variant_dir = new_variant_dir(dataset_dir, format_name, compression)
-    log_path = variant_dir / "generate.log"
-    artifact = variant_dir / ("data.gz" if compression == "gzip" else "data")
-    manifest_path = variant_dir / "manifest.json"
-    existing_manifest = next(
-        (path / "manifest.json" for path in variant_candidates(dataset_dir, format_name, compression) if (path / "manifest.json").is_file()),
-        manifest_path,
-    )
-    if existing_manifest.exists() and not regenerate:
-        existing = read_json(existing_manifest)
+    expected_compression = manifest_compression(dataset_manifest)
+    if compression != expected_compression:
+        raise DatasetError(
+            f"requested compression {compression} conflicts with dataset compression {expected_compression}"
+        )
+    path = variant_dir(dataset_dir, format_name)
+    log_path = path / "generate.log"
+    artifact = path / ("data.gz" if compression == "gzip" else "data")
+    manifest_path = path / "manifest.json"
+    if manifest_path.exists() and not regenerate:
+        existing = read_json(manifest_path)
         if existing.get("status") == "completed":
             if rebuild:
                 run_build(log_path, True)
@@ -368,7 +372,7 @@ def generate_variant(
             )
             return result(dataset_dir, dataset_manifest, selected_dir, manifest, reused=True)
 
-    variant_dir.mkdir(parents=True, exist_ok=True)
+    path.mkdir(parents=True, exist_ok=True)
     toolchain = run_build(log_path, rebuild)
     spec = dataset_manifest["spec"]
     command = [
@@ -468,7 +472,7 @@ def generate_variant(
         },
     }
     save_json(manifest_path, manifest)
-    return result(dataset_dir, dataset_manifest, variant_dir, manifest, reused=False)
+    return result(dataset_dir, dataset_manifest, path, manifest, reused=False)
 
 
 def result(
@@ -501,6 +505,7 @@ def logical_result(dataset_dir: Path, dataset_manifest: dict[str, Any], *, reuse
     return {
         "dataset_id": dataset_manifest["dataset_id"],
         "dataset_path": str(dataset_dir),
+        "compression": manifest_compression(dataset_manifest),
         "estimated_points": estimated_points(dataset_manifest["spec"]),
         "spec": dataset_manifest["spec"],
         "reused": reused,
@@ -512,19 +517,27 @@ def prepare_dataset(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     dataset_dir = resolve_dataset_path(args) if explicit_selection else None
     if dataset_dir is not None and (dataset_dir / "dataset.json").exists():
         manifest = validate_dataset_manifest(dataset_dir)
+        requested_compression = getattr(args, "compression", None)
+        compression = manifest_compression(manifest)
+        if requested_compression is not None and requested_compression != compression:
+            raise DatasetError(
+                f"requested compression {requested_compression} conflicts with dataset compression {compression}"
+            )
         requested = logical_spec(args, manifest["spec"])
         if requested != manifest["spec"]:
             raise DatasetError(f"dataset settings do not match requested workload: {dataset_dir}")
         return dataset_dir, manifest
 
     spec = logical_spec(args)
-    dataset_dir = dataset_dir or resolve_dataset_path(args, spec)
+    compression = getattr(args, "compression", None) or "none"
+    dataset_dir = dataset_dir or resolve_dataset_path(args, spec, compression)
     manifest_path = dataset_dir / "dataset.json"
     dataset_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "dataset_id": args.dataset_id or automatic_dataset_id(spec),
+        "dataset_id": args.dataset_id or automatic_dataset_id(spec, compression),
         "created_at": utc_now(),
+        "compression": compression,
         "spec": spec,
     }
     save_json(manifest_path, manifest)
@@ -541,22 +554,19 @@ def list_datasets(args: argparse.Namespace) -> list[dict[str, Any]]:
             continue
         try:
             manifest = validate_dataset_manifest(path)
+            compression = manifest_compression(manifest)
             variants = []
             if (path / "formats").is_dir():
                 for child in sorted(path.joinpath("formats").iterdir()):
-                    if not child.is_dir():
+                    if not child.is_dir() or not (child / "manifest.json").is_file():
                         continue
-                    for compression in COMPRESSIONS:
-                        selected_manifest = next(
-                            (candidate / "manifest.json" for candidate in variant_candidates(path, child.name, compression) if (candidate / "manifest.json").is_file()),
-                            None,
-                        )
-                        if selected_manifest is not None and read_json(selected_manifest).get("status") == "completed":
-                            variants.append({"format": child.name, "compression": compression})
+                    if read_json(child / "manifest.json").get("status") == "completed":
+                        variants.append({"format": child.name, "compression": compression})
             datasets.append(
                 {
                     "dataset_id": manifest.get("dataset_id", path.name),
                     "dataset_path": str(path.resolve()),
+                    "compression": compression,
                     "spec": manifest["spec"],
                     "formats": sorted({item["format"] for item in variants}),
                     "variants": variants,
@@ -574,24 +584,32 @@ def select_existing(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
 
 def verify_dataset(args: argparse.Namespace) -> dict[str, Any]:
     path, manifest = select_existing(args)
-    selected: list[tuple[str, str]] = []
+    compression = manifest_compression(manifest)
+    if args.compression is not None and args.compression != compression:
+        raise DatasetError(
+            f"requested compression {args.compression} conflicts with dataset compression {compression}"
+        )
+    selected: list[str] = []
     formats_dir = path / "formats"
     formats = [args.format] if args.format else (
         sorted(child.name for child in formats_dir.iterdir() if child.is_dir()) if formats_dir.exists() else []
     )
     for format_name in formats:
-        compressions = [args.compression] if args.compression else list(COMPRESSIONS)
-        for compression in compressions:
-            if any((candidate / "manifest.json").is_file() for candidate in variant_candidates(path, format_name, compression)):
-                selected.append((format_name, compression))
+        if (variant_dir(path, format_name) / "manifest.json").is_file():
+            selected.append(format_name)
     if not selected:
         raise DatasetError(f"dataset has no format variants: {path}")
     variants = []
-    for format_name, compression in selected:
+    for format_name in selected:
         validate_format(format_name)
-        variant_dir, variant = validate_variant(path, format_name, compression, verify_checksum=True)
-        variants.append(result(path, manifest, variant_dir, variant, reused=True))
-    return {"dataset_id": manifest["dataset_id"], "dataset_path": str(path), "variants": variants}
+        selected_dir, variant = validate_variant(path, format_name, compression, verify_checksum=True)
+        variants.append(result(path, manifest, selected_dir, variant, reused=True))
+    return {
+        "dataset_id": manifest["dataset_id"],
+        "dataset_path": str(path),
+        "compression": compression,
+        "variants": variants,
+    }
 
 
 def print_output(value: Any, as_json: bool) -> None:
@@ -630,7 +648,7 @@ def make_parser() -> argparse.ArgumentParser:
     add_selection_options(generate)
     generate.add_argument("--profile", choices=sorted(PROFILES))
     generate.add_argument("--format", required=True)
-    generate.add_argument("--compression", choices=COMPRESSIONS, default="none")
+    generate.add_argument("--compression", choices=COMPRESSIONS)
     generate.add_argument("--use-case")
     generate.add_argument("--start")
     generate.add_argument("--end")
@@ -646,6 +664,7 @@ def make_parser() -> argparse.ArgumentParser:
     add_root_options(prepare)
     add_selection_options(prepare)
     prepare.add_argument("--profile", choices=sorted(PROFILES))
+    prepare.add_argument("--compression", choices=COMPRESSIONS)
     prepare.add_argument("--use-case")
     prepare.add_argument("--start")
     prepare.add_argument("--end")
@@ -686,8 +705,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         validate_args(args)
         if args.command == "generate":
             path, manifest = prepare_dataset(args)
+            compression = manifest_compression(manifest)
             point_count = estimated_points(manifest["spec"])
-            if point_count is not None and point_count >= 50_000_000 and args.compression == "none":
+            if point_count is not None and point_count >= 50_000_000 and compression == "none":
                 print(
                     f"warning: dataset has an estimated {point_count:,} points; consider --compression gzip",
                     file=sys.stderr,
@@ -696,12 +716,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 path,
                 manifest,
                 args.format,
-                compression=args.compression,
+                compression=compression,
                 regenerate=args.regenerate,
                 rebuild=args.rebuild,
             )
         elif args.command == "prepare":
-            selected_before = resolve_dataset_path(args, logical_spec(args))
+            selected_before = resolve_dataset_path(
+                args, logical_spec(args), args.compression or "none"
+            )
             existed = (selected_before / "dataset.json").is_file()
             path, manifest = prepare_dataset(args)
             output = logical_result(path, manifest, reused=existed)
@@ -709,7 +731,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             output = list_datasets(args)
         elif args.command == "inspect":
             path, manifest = select_existing(args)
-            output = {**manifest, "dataset_path": str(path)}
+            output = {
+                **manifest,
+                "compression": manifest_compression(manifest),
+                "dataset_path": str(path),
+            }
         else:
             output = verify_dataset(args)
         if getattr(args, "result_file", None):

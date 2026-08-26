@@ -47,9 +47,10 @@ the complete artifact to recompute its checksum.
 
 Compression is opt-in: `--compression none` is the default and
 `--compression gzip` writes a deterministic gzip stream without first storing
-plain data. Plain and gzip variants coexist. For `cpu-only`, calculate points as
-`hosts × floor(duration / interval)` and recommend gzip at 50 million points or
-more. Report the estimate before generating when a choice is still needed.
+plain data. Compression is part of dataset identity, so plain and gzip data use
+separate dataset directories. For `cpu-only`, calculate points as `hosts ×
+floor(duration / interval)` and recommend gzip at 50 million points or more.
+Report the estimate before generating when a choice is still needed.
 
 ## Inspect and verify
 

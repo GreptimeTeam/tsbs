@@ -118,7 +118,8 @@ under `--query-root` and are reused only after exact manifest, membership,
 size, and checksum validation.
 
 Data compression is opt-in with `--compression gzip`; plain remains the
-default and compression is pinned by the run. Recommend gzip when the
+default, compression is pinned by the run, and each compression has a distinct
+dataset identity. Recommend gzip when the
 `cpu-only` estimate reaches 50 million points. Compressed data is decompressed
 directly into the loader without a temporary plain file.
 

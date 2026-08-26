@@ -16,10 +16,9 @@ Both Core and Enterprise consume the same `influx` line-protocol dataset and
 native InfluxDB 3 SQL query set. Reuse identical artifacts, query order,
 workers, batch sizes, and durability flags for comparisons.
 
-Compression is a run-pinned storage variant rather than logical dataset
-identity. Plain and gzip artifacts coexist, while canonical uncompressed size
-and SHA-256 keep bindings equivalent. Gzip is streamed into the loader without
-a temporary plain file.
+Compression is pinned by the run and is part of dataset identity. Plain and
+gzip artifacts use separate dataset directories. Gzip is streamed into the
+loader without a temporary plain file.
 
 ## Profiles
 
