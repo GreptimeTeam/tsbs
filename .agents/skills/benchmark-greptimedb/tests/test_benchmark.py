@@ -33,6 +33,18 @@ class StreamingInputTests(unittest.TestCase):
             )
             self.assertIn("2", log.read_text(encoding="utf-8"))
 
+    def test_run_tee_reports_external_gzip_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); data = root / "data.gz"; log = root / "load.log"
+            data.write_bytes(b"not gzip")
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "gzip decompression failed"):
+                benchmark.run_tee(
+                    [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+                    log,
+                    stdin_path=data,
+                    stdin_compression="gzip",
+                )
+
 
 class SummaryIntegrationTests(unittest.TestCase):
     def test_greptimedb_target_identity_is_rendered(self) -> None:

@@ -43,7 +43,8 @@ not both. Existing logical datasets inherit stored settings unless explicit
 overrides conflict. Pass `--regenerate` only to intentionally replace a format
 variant and `--rebuild` only to rebuild the generator. Reuse validates the
 manifest, completion status, artifact presence, and byte size without rereading
-the complete artifact to recompute its checksum.
+the complete artifact to recompute its checksum. Dual-checksum variant schema
+v2 is unsupported; regenerate those cached variants with `--regenerate`.
 
 Compression is opt-in: `--compression none` is the default and
 `--compression gzip` writes a deterministic gzip stream without first storing
@@ -63,8 +64,7 @@ python3 .agents/skills/generate-tsbs-data/scripts/generate.py verify \
 
 Use `--json` or `--result-file` for machine-readable output. Report the
 dataset ID and specification; for materialized variants also report format,
-compression, data path, estimated points, canonical content size/SHA-256, and
-stored artifact size/SHA-256. The `verify` command explicitly recomputes both
-the artifact and decompressed-content checksums and should be used when full
-cache integrity validation is required. Database-specific query generation
-belongs to the corresponding benchmark skill.
+compression, data path, estimated points, and stored file size/SHA-256. The
+`verify` command explicitly recomputes the stored file checksum and should be
+used when full cache integrity validation is required. Database-specific query
+generation belongs to the corresponding benchmark skill.

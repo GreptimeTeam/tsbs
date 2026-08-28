@@ -4,6 +4,7 @@ import io
 import gzip
 import json
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -146,7 +147,16 @@ class DatasetVariantTests(unittest.TestCase):
             with mock.patch.object(generate, "GENERATOR", fake):
                 first = generate.generate_variant(dataset_dir, manifest, "influx", compression="gzip", regenerate=False, rebuild=False)
                 second = generate.generate_variant(dataset_dir, manifest, "influx", compression="gzip", regenerate=True, rebuild=False)
-            self.assertEqual(first["artifact_sha256"], second["artifact_sha256"])
+            self.assertEqual(first["sha256"], second["sha256"])
+            artifact = Path(second["data_path"])
+            self.assertEqual(second["bytes"], artifact.stat().st_size)
+            self.assertEqual(second["sha256"], generate.stored_file_sha256(artifact))
+            with gzip.open(artifact, "rb") as stream:
+                self.assertEqual(stream.read(), b"valid payload\n")
+            variant = json.loads((artifact.parent / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(variant["schema_version"], 1)
+            self.assertNotIn("artifact_bytes", variant)
+            self.assertNotIn("artifact_sha256", variant)
 
     def test_reuse_skips_checksum_verification(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -159,7 +169,7 @@ class DatasetVariantTests(unittest.TestCase):
                 )
                 with mock.patch.object(
                     generate,
-                    "sha256_file",
+                    "stored_file_sha256",
                     side_effect=AssertionError("reuse must not hash the artifact"),
                 ):
                     reused = generate.generate_variant(
@@ -204,7 +214,7 @@ class DatasetVariantTests(unittest.TestCase):
             with self.assertRaisesRegex(generate.DatasetError, "checksum mismatch"):
                 generate.verify_dataset(verify_args)
 
-    def test_verify_checks_decompressed_content_identity(self) -> None:
+    def test_schema_v2_is_rejected_and_can_be_regenerated(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             fake = self.make_generator(root, "print('valid')\n")
@@ -212,19 +222,26 @@ class DatasetVariantTests(unittest.TestCase):
             with mock.patch.object(generate, "GENERATOR", fake):
                 result = generate.generate_variant(dataset_dir, manifest, "influx", compression="gzip", regenerate=False, rebuild=False)
             artifact = Path(result["data_path"])
-            with artifact.open("wb") as raw:
-                with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as stream:
-                    stream.write(b"other\n")
             manifest_path = artifact.parent / "manifest.json"
             variant = json.loads(manifest_path.read_text(encoding="utf-8"))
+            variant["schema_version"] = 2
             variant["artifact_bytes"] = artifact.stat().st_size
-            variant["artifact_sha256"] = generate.sha256_file(artifact)
+            variant["artifact_sha256"] = generate.stored_file_sha256(artifact)
             manifest_path.write_text(json.dumps(variant), encoding="utf-8")
-            verify_args = generate.make_parser().parse_args([
-                "verify", "--dataset-path", str(dataset_dir), "--format", "influx", "--compression", "gzip",
-            ])
-            with self.assertRaisesRegex(generate.DatasetError, "content checksum mismatch"):
-                generate.verify_dataset(verify_args)
+            with self.assertRaisesRegex(generate.DatasetError, "--regenerate"):
+                generate.generate_variant(
+                    dataset_dir, manifest, "influx", compression="gzip", regenerate=False, rebuild=False
+                )
+            list_args = generate.make_parser().parse_args(["list", "--dataset-root", str(root)])
+            self.assertEqual(generate.list_datasets(list_args)[0]["formats"], [])
+            with mock.patch.object(generate, "GENERATOR", fake):
+                regenerated = generate.generate_variant(
+                    dataset_dir, manifest, "influx", compression="gzip", regenerate=True, rebuild=False
+                )
+            self.assertFalse(regenerated["reused"])
+            replaced = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(replaced["schema_version"], 1)
+            self.assertNotIn("artifact_sha256", replaced)
 
     def test_failed_regeneration_preserves_completed_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -241,6 +258,46 @@ class DatasetVariantTests(unittest.TestCase):
             with mock.patch.object(generate, "GENERATOR", bad):
                 with self.assertRaises(generate.DatasetError):
                     generate.generate_variant(dataset_dir, manifest, "influx", regenerate=True, rebuild=False)
+            self.assertEqual(data_path.read_bytes(), old_data)
+            self.assertEqual(manifest_path.read_bytes(), old_manifest)
+
+    def test_failed_gzip_and_checksum_preserve_completed_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            generator = self.make_generator(root, "print('original')\n")
+            dataset_dir, manifest = self.prepare(root, "gzip")
+            with mock.patch.object(generate, "GENERATOR", generator):
+                original = generate.generate_variant(
+                    dataset_dir, manifest, "influx", compression="gzip", regenerate=False, rebuild=False
+                )
+            data_path = Path(original["data_path"])
+            manifest_path = data_path.parent / "manifest.json"
+            old_data = data_path.read_bytes()
+            old_manifest = manifest_path.read_bytes()
+
+            bad_gzip_root = root / "bad-gzip"
+            bad_gzip_root.mkdir()
+            bad_gzip = self.make_generator(
+                bad_gzip_root,
+                "import sys\nsys.stdin.buffer.read()\nraise SystemExit(2)\n",
+            )
+            with mock.patch.object(generate, "GENERATOR", generator), mock.patch.object(
+                generate, "gzip_command", return_value=[str(bad_gzip)]
+            ):
+                with self.assertRaisesRegex(generate.DatasetError, "gzip failed"):
+                    generate.generate_variant(
+                        dataset_dir, manifest, "influx", compression="gzip", regenerate=True, rebuild=False
+                    )
+            self.assertEqual(data_path.read_bytes(), old_data)
+            self.assertEqual(manifest_path.read_bytes(), old_manifest)
+
+            with mock.patch.object(generate, "GENERATOR", generator), mock.patch.object(
+                generate, "stored_file_sha256", side_effect=generate.DatasetError("checksum failed")
+            ):
+                with self.assertRaisesRegex(generate.DatasetError, "checksum failed"):
+                    generate.generate_variant(
+                        dataset_dir, manifest, "influx", compression="gzip", regenerate=True, rebuild=False
+                    )
             self.assertEqual(data_path.read_bytes(), old_data)
             self.assertEqual(manifest_path.read_bytes(), old_manifest)
 
@@ -281,7 +338,24 @@ class DatasetVariantTests(unittest.TestCase):
             )
             verified = generate.verify_dataset(verify_args)
             artifact = Path(verified["variants"][0]["data_path"])
-            self.assertEqual(verified["variants"][0]["sha256"], generate.sha256_file(artifact))
+            self.assertEqual(verified["variants"][0]["sha256"], generate.stored_file_sha256(artifact))
+
+    def test_checksum_command_prefers_sha256sum_and_falls_back_to_shasum(self) -> None:
+        with mock.patch.object(generate.shutil, "which", side_effect=lambda name: "/usr/bin/sha256sum" if name == "sha256sum" else None):
+            self.assertEqual(generate.sha256_command(), ["/usr/bin/sha256sum"])
+        with mock.patch.object(generate.shutil, "which", side_effect=lambda name: "/usr/bin/shasum" if name == "shasum" else None):
+            self.assertEqual(generate.sha256_command(), ["/usr/bin/shasum", "-a", "256"])
+
+    def test_checksum_command_reports_missing_tools_and_bad_output(self) -> None:
+        with mock.patch.object(generate.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(generate.DatasetError, "sha256sum or shasum"):
+                generate.sha256_command()
+        completed = subprocess.CompletedProcess(["sha256sum"], 0, stdout="not-a-checksum  file\n", stderr="")
+        with mock.patch.object(generate, "sha256_command", return_value=["sha256sum"]), mock.patch.object(
+            generate.subprocess, "run", return_value=completed
+        ):
+            with self.assertRaisesRegex(generate.DatasetError, "invalid SHA-256 output"):
+                generate.stored_file_sha256(Path("file"))
 
     def test_result_file_is_machine_readable(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

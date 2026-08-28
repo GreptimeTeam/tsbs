@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import subprocess
 import sys
@@ -15,6 +16,33 @@ sys.path.insert(0, str(SCRIPTS))
 
 import benchmark  # noqa: E402
 import summarize  # noqa: E402
+
+
+class StreamingInputTests(unittest.TestCase):
+    def test_run_tee_decompresses_gzip_to_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); data = root / "data.gz"; log = root / "load.log"
+            with gzip.open(data, "wb") as stream:
+                stream.write(b"alpha\nbeta\n")
+            benchmark.run_tee(
+                [sys.executable, "-c", "import sys; print(len(sys.stdin.readlines()))"],
+                log,
+                stdin_path=data,
+                stdin_compression="gzip",
+            )
+            self.assertIn("2", log.read_text(encoding="utf-8"))
+
+    def test_run_tee_reports_external_gzip_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); data = root / "data.gz"; log = root / "load.log"
+            data.write_bytes(b"not gzip")
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "gzip decompression failed"):
+                benchmark.run_tee(
+                    [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+                    log,
+                    stdin_path=data,
+                    stdin_compression="gzip",
+                )
 
 
 class SummaryIntegrationTests(unittest.TestCase):

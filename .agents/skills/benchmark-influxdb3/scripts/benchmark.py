@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import gzip
 import hashlib
 import json
 import os
@@ -16,7 +15,6 @@ import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import urllib.error
 import urllib.parse
@@ -185,32 +183,53 @@ def run_tee(
         header = f"$ {display_command(command)}\n"
         write_streams(header, sys.stdout, log)
         if stdout_path is None:
-            process = subprocess.Popen(command, cwd=REPO_ROOT, stdin=subprocess.PIPE if stdin_path else None, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-            pump_errors: list[Exception] = []
-            pump = None
+            source = None
+            decompressor = None
+            process_stdin: Any = None
             if stdin_path:
-                assert process.stdin is not None
-                def pump_input() -> None:
-                    try:
-                        opener = gzip.open if stdin_compression == "gzip" else open
-                        with opener(stdin_path, "rb") as source:
-                            shutil.copyfileobj(source, process.stdin.buffer, length=1024 * 1024)
-                    except Exception as exc:
-                        pump_errors.append(exc)
-                    finally:
-                        try:
-                            process.stdin.close()
-                        except (BrokenPipeError, OSError) as exc:
-                            if not pump_errors:
-                                pump_errors.append(exc)
-                pump = threading.Thread(target=pump_input, daemon=True); pump.start()
+                source = stdin_path.open("rb")
+                if stdin_compression == "gzip":
+                    gzip_binary = shutil.which("gzip")
+                    if not gzip_binary:
+                        source.close()
+                        raise BenchmarkError("gzip dataset loading requires the gzip command")
+                    decompression_command = [gzip_binary, "-cd"]
+                    decompression_header = f"$ {display_command(decompression_command)} < {stdin_path}\n"
+                    write_streams(decompression_header, sys.stdout, log)
+                    decompressor = subprocess.Popen(
+                        decompression_command,
+                        cwd=REPO_ROOT,
+                        stdin=source,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    assert decompressor.stdout is not None
+                    process_stdin = decompressor.stdout
+                elif stdin_compression == "none":
+                    process_stdin = source
+                else:
+                    source.close()
+                    raise BenchmarkError(f"unsupported dataset input compression: {stdin_compression}")
+            process = subprocess.Popen(command, cwd=REPO_ROOT, stdin=process_stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            if decompressor:
+                assert decompressor.stdout is not None
+                decompressor.stdout.close()
             assert process.stdout is not None
             tee_stream(process.stdout, sys.stdout, log)
             process.stdout.close(); return_code = process.wait()
-            if pump:
-                pump.join()
-            if pump_errors and return_code == 0:
-                raise BenchmarkError(f"failed to stream dataset input: {pump_errors[0]}")
+            decompression_return_code = 0
+            decompression_error = ""
+            if decompressor:
+                _, decompression_stderr = decompressor.communicate()
+                decompression_return_code = decompressor.returncode
+                decompression_error = decompression_stderr.decode("utf-8", errors="replace").strip()
+            if source:
+                source.close()
+            if decompression_return_code and return_code == 0:
+                suffix = f": {decompression_error}" if decompression_error else ""
+                raise BenchmarkError(
+                    f"gzip decompression failed with exit code {decompression_return_code}{suffix}; see {log_path}"
+                )
         else:
             stdout_path.parent.mkdir(parents=True, exist_ok=True)
             temporary_output = stdout_path.with_name(stdout_path.name + ".tmp")

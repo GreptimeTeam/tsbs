@@ -5,12 +5,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import gzip
 import hashlib
-import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -29,7 +28,6 @@ DEFAULT_DATASET_ROOT = REPO_ROOT / ".benchmarks" / "datasets"
 GENERATOR = REPO_ROOT / "bin" / "tsbs_generate_data"
 GENERATOR_BUILD_METADATA = REPO_ROOT / "bin" / "tsbs_generate_data.build.json"
 SCHEMA_VERSION = 1
-VARIANT_SCHEMA_VERSION = 2
 FORMAT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 GO_DURATION_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)(ns|us|µs|ms|s|m|h)")
@@ -59,24 +57,6 @@ class DatasetError(RuntimeError):
     """Raised for an actionable dataset error."""
 
 
-class HashingWriter:
-    """Track bytes and SHA-256 while forwarding a binary stream."""
-
-    def __init__(self, output: io.BufferedWriter):
-        self.output = output
-        self.bytes = 0
-        self.digest = hashlib.sha256()
-
-    def write(self, value: bytes) -> int:
-        written = self.output.write(value)
-        self.digest.update(value[:written])
-        self.bytes += written
-        return written
-
-    def flush(self) -> None:
-        self.output.flush()
-
-
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -91,6 +71,37 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_command() -> list[str]:
+    sha256sum = shutil.which("sha256sum")
+    if sha256sum:
+        return [sha256sum]
+    shasum = shutil.which("shasum")
+    if shasum:
+        return [shasum, "-a", "256"]
+    raise DatasetError("SHA-256 verification requires sha256sum or shasum")
+
+
+def stored_file_sha256(path: Path) -> str:
+    """Compute an artifact checksum outside Python's data path."""
+    command = [*sha256_command(), str(path)]
+    process = subprocess.run(command, check=False, capture_output=True, text=True)
+    if process.returncode:
+        detail = process.stderr.strip() or process.stdout.strip()
+        suffix = f": {detail}" if detail else ""
+        raise DatasetError(f"failed to checksum dataset artifact {path}{suffix}")
+    checksum = process.stdout.split(maxsplit=1)[0].lower() if process.stdout.split() else ""
+    if re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
+        raise DatasetError(f"invalid SHA-256 output for dataset artifact {path}")
+    return checksum
+
+
+def gzip_command() -> list[str]:
+    gzip_binary = shutil.which("gzip")
+    if not gzip_binary:
+        raise DatasetError("gzip compression requires the gzip command")
+    return [gzip_binary, "-n", "-6", "-c"]
 
 
 def parse_go_duration(value: str) -> int:
@@ -231,58 +242,38 @@ def variant_dir(dataset_dir: Path, format_name: str) -> Path:
 def validate_variant(
     dataset_dir: Path,
     format_name: str,
-    compression: str = "none",
     *,
     verify_checksum: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
     path = variant_dir(dataset_dir, format_name)
     manifest = read_json(path / "manifest.json")
-    if manifest.get("schema_version") not in (SCHEMA_VERSION, VARIANT_SCHEMA_VERSION):
-        raise DatasetError(f"unsupported dataset format schema: {path / 'manifest.json'}")
+    if manifest.get("schema_version") != SCHEMA_VERSION:
+        raise DatasetError(
+            f"unsupported dataset format schema: {path / 'manifest.json'}; "
+            "regenerate it with --regenerate"
+        )
     if manifest.get("status") != "completed":
         raise DatasetError(f"dataset format variant is not complete: {path}")
     if manifest.get("format") != format_name:
         raise DatasetError(f"dataset format manifest mismatch: {path}")
-    recorded_compression = manifest.get("compression", "none")
-    if recorded_compression != compression:
-        raise DatasetError(f"dataset compression manifest mismatch: {path}")
     artifact = path / str(manifest.get("artifact", "data"))
     if not artifact.is_file():
         raise DatasetError(f"missing dataset artifact: {artifact}")
-    recorded_size = manifest.get("artifact_bytes", manifest.get("bytes"))
-    recorded_checksum = manifest.get("artifact_sha256", manifest.get("sha256"))
-    content_size = manifest.get("bytes")
-    content_checksum = manifest.get("sha256")
+    recorded_size = manifest.get("bytes")
+    recorded_checksum = manifest.get("sha256")
     if (
         isinstance(recorded_size, bool)
         or not isinstance(recorded_size, int)
         or recorded_size < 0
         or not isinstance(recorded_checksum, str)
         or re.fullmatch(r"[0-9a-f]{64}", recorded_checksum) is None
-        or isinstance(content_size, bool)
-        or not isinstance(content_size, int)
-        or content_size < 0
-        or not isinstance(content_checksum, str)
-        or re.fullmatch(r"[0-9a-f]{64}", content_checksum) is None
     ):
         raise DatasetError(f"malformed dataset format manifest: {path}")
     actual_size = artifact.stat().st_size
     if actual_size != recorded_size:
         raise DatasetError(f"dataset artifact size mismatch: {artifact}")
-    if verify_checksum and sha256_file(artifact) != recorded_checksum:
+    if verify_checksum and stored_file_sha256(artifact) != recorded_checksum:
         raise DatasetError(f"dataset artifact checksum mismatch: {artifact}")
-    if verify_checksum and compression == "gzip":
-        content_digest = hashlib.sha256()
-        content_bytes = 0
-        try:
-            with gzip.open(artifact, "rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    content_digest.update(chunk)
-                    content_bytes += len(chunk)
-        except (gzip.BadGzipFile, EOFError, OSError) as exc:
-            raise DatasetError(f"invalid gzip dataset artifact: {artifact}") from exc
-        if content_bytes != manifest.get("bytes") or content_digest.hexdigest() != manifest.get("sha256"):
-            raise DatasetError(f"dataset content checksum mismatch: {artifact}")
     return path, manifest
 
 
@@ -368,7 +359,7 @@ def generate_variant(
             if rebuild:
                 run_build(log_path, True)
             selected_dir, manifest = validate_variant(
-                dataset_dir, format_name, compression, verify_checksum=False
+                dataset_dir, format_name, verify_checksum=False
             )
             return result(dataset_dir, dataset_manifest, selected_dir, manifest, reused=True)
 
@@ -387,80 +378,96 @@ def generate_variant(
     ]
     temporary = artifact.with_name(f"data.tmp-{os.getpid()}")
     started_at = utc_now()
+    sha256_command()
+    compression_command = gzip_command() if compression == "gzip" else None
+    return_code = 0
+    compression_return_code = 0
     with log_path.open("a", encoding="utf-8") as log:
         header = f"$ {command_text(command)}\n"
         log.write(header)
         print(header, end="", file=sys.stderr)
         with temporary.open("wb") as output:
-            stored = HashingWriter(output)
-            content_digest = hashlib.sha256()
-            content_bytes = 0
             process = subprocess.Popen(
                 command,
                 cwd=REPO_ROOT,
-                stdout=subprocess.PIPE,
+                stdout=subprocess.PIPE if compression_command else output,
                 stderr=subprocess.PIPE,
             )
-            assert process.stdout is not None
             assert process.stderr is not None
 
-            def drain_stderr() -> None:
-                for raw_line in iter(process.stderr.readline, b""):
+            def drain_stderr(stream: Any) -> None:
+                for raw_line in iter(stream.readline, b""):
                     line = raw_line.decode("utf-8", errors="replace")
                     log.write(line)
                     log.flush()
                     sys.stderr.write(line)
                     sys.stderr.flush()
 
-            stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+            stderr_thread = threading.Thread(target=drain_stderr, args=(process.stderr,), daemon=True)
             stderr_thread.start()
-            encoded: Any
-            if compression == "gzip":
-                encoded = gzip.GzipFile(filename="", mode="wb", fileobj=stored, compresslevel=6, mtime=0)
-            else:
-                encoded = stored
-            try:
-                for chunk in iter(lambda: process.stdout.read(1024 * 1024), b""):
-                    content_digest.update(chunk)
-                    content_bytes += len(chunk)
-                    encoded.write(chunk)
-            finally:
-                if compression == "gzip":
-                    encoded.close()
-                else:
-                    encoded.flush()
-            process.stdout.close()
+            compressor = None
+            compression_stderr_thread = None
+            if compression_command:
+                assert process.stdout is not None
+                compression_header = f"$ {command_text(compression_command)}\n"
+                log.write(compression_header)
+                print(compression_header, end="", file=sys.stderr)
+                compressor = subprocess.Popen(
+                    compression_command,
+                    cwd=REPO_ROOT,
+                    stdin=process.stdout,
+                    stdout=output,
+                    stderr=subprocess.PIPE,
+                )
+                process.stdout.close()
+                assert compressor.stderr is not None
+                compression_stderr_thread = threading.Thread(
+                    target=drain_stderr,
+                    args=(compressor.stderr,),
+                    daemon=True,
+                )
+                compression_stderr_thread.start()
             return_code = process.wait()
             stderr_thread.join()
             process.stderr.close()
-    if return_code:
+            if compressor:
+                compression_return_code = compressor.wait()
+                assert compression_stderr_thread is not None
+                compression_stderr_thread.join()
+                assert compressor.stderr is not None
+                compressor.stderr.close()
+    if return_code or compression_return_code:
         temporary.unlink(missing_ok=True)
         if not artifact.exists():
             save_json(
                 manifest_path,
                 {
-                    "schema_version": VARIANT_SCHEMA_VERSION,
+                    "schema_version": SCHEMA_VERSION,
                     "format": format_name,
-                    "compression": compression,
                     "status": "failed",
                     "started_at": started_at,
                     "finished_at": utc_now(),
                     "log": "generate.log",
                 },
             )
-        raise DatasetError(f"tsbs_generate_data failed with exit code {return_code}; see {log_path}")
+        if return_code:
+            raise DatasetError(f"tsbs_generate_data failed with exit code {return_code}; see {log_path}")
+        raise DatasetError(f"gzip failed with exit code {compression_return_code}; see {log_path}")
 
+    try:
+        stored_checksum = stored_file_sha256(temporary)
+        stored_bytes = temporary.stat().st_size
+    except (DatasetError, OSError):
+        temporary.unlink(missing_ok=True)
+        raise
     os.replace(temporary, artifact)
     manifest = {
-        "schema_version": VARIANT_SCHEMA_VERSION,
+        "schema_version": SCHEMA_VERSION,
         "format": format_name,
-        "compression": compression,
         "status": "completed",
         "artifact": artifact.name,
-        "bytes": content_bytes,
-        "sha256": content_digest.hexdigest(),
-        "artifact_bytes": stored.bytes,
-        "artifact_sha256": stored.digest.hexdigest(),
+        "bytes": stored_bytes,
+        "sha256": stored_checksum,
         "started_at": started_at,
         "finished_at": utc_now(),
         "log": "generate.log",
@@ -488,12 +495,10 @@ def result(
         "dataset_id": dataset_manifest["dataset_id"],
         "dataset_path": str(dataset_dir),
         "format": format_name,
-        "compression": variant_manifest.get("compression", "none"),
+        "compression": manifest_compression(dataset_manifest),
         "data_path": str(variant_dir / str(variant_manifest["artifact"])),
         "bytes": variant_manifest["bytes"],
         "sha256": variant_manifest["sha256"],
-        "artifact_bytes": variant_manifest.get("artifact_bytes", variant_manifest["bytes"]),
-        "artifact_sha256": variant_manifest.get("artifact_sha256", variant_manifest["sha256"]),
         "estimated_points": estimated_points(dataset_manifest["spec"]),
         "spec": dataset_manifest["spec"],
         "reused": reused,
@@ -560,7 +565,15 @@ def list_datasets(args: argparse.Namespace) -> list[dict[str, Any]]:
                 for child in sorted(path.joinpath("formats").iterdir()):
                     if not child.is_dir() or not (child / "manifest.json").is_file():
                         continue
-                    if read_json(child / "manifest.json").get("status") == "completed":
+                    try:
+                        validate_variant(
+                            path,
+                            child.name,
+                            verify_checksum=False,
+                        )
+                    except DatasetError:
+                        continue
+                    else:
                         variants.append({"format": child.name, "compression": compression})
             datasets.append(
                 {
@@ -602,7 +615,7 @@ def verify_dataset(args: argparse.Namespace) -> dict[str, Any]:
     variants = []
     for format_name in selected:
         validate_format(format_name)
-        selected_dir, variant = validate_variant(path, format_name, compression, verify_checksum=True)
+        selected_dir, variant = validate_variant(path, format_name, verify_checksum=True)
         variants.append(result(path, manifest, selected_dir, variant, reused=True))
     return {
         "dataset_id": manifest["dataset_id"],
@@ -623,8 +636,7 @@ def print_output(value: Any, as_json: bool) -> None:
         action = "reused" if value.get("reused") else "generated"
         print(f"Dataset {action}: {value['dataset_id']} ({value['format']}, {value['compression']})")
         print(f"Data: {value['data_path']}")
-        print(f"Content SHA-256: {value['sha256']}")
-        print(f"Artifact SHA-256: {value['artifact_sha256']}")
+        print(f"Stored file SHA-256: {value['sha256']}")
     else:
         print(json.dumps(value, indent=2, sort_keys=True))
 

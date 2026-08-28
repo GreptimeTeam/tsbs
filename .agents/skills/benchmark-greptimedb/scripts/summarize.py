@@ -111,8 +111,7 @@ def render_markdown(summary: dict[str, Any]) -> str:
                 f"- Dataset: `{dataset.get('dataset_id')}`",
                 f"- Data format: `{dataset.get('format')}`",
                 f"- Data compression: `{dataset.get('compression', 'none')}`",
-                f"- Data SHA-256: `{dataset.get('sha256')}`",
-                f"- Stored artifact SHA-256: `{dataset.get('artifact_sha256', dataset.get('sha256'))}`",
+                f"- Stored file SHA-256: `{dataset.get('sha256')}`",
                 f"- Data path: `{dataset.get('data_path')}`",
             ]
         )

@@ -18,10 +18,11 @@ specification contains `use_case`, `seed`, `scale`, `start`, `end`, and
 `log_interval`.
 
 Each dataset selects one compression and each format directory contains one
-serialization. The manifests record status, compression, canonical
-uncompressed size/SHA-256, stored artifact size/SHA-256, generator binary
-checksum, Git revision, and timestamps. Existing schema-v1 datasets without a
-compression field remain valid plain datasets.
+serialization. Variant manifests use schema v1 and record status, stored file
+size/SHA-256, generator binary checksum, Git revision, and timestamps.
+Compression is recorded by the logical dataset manifest. Existing logical
+schema-v1 datasets without a compression field remain valid plain datasets.
+The discontinued dual-checksum variant schema v2 must be regenerated.
 
 ## Profiles
 
