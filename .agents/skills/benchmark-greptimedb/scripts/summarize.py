@@ -95,15 +95,18 @@ def render_markdown(summary: dict[str, Any]) -> str:
     if target:
         target_name = target.get("database_id") or target.get("endpoint")
         lines.append(f"- Benchmark target: `{target.get('mode')}:{target_name}`")
+        runtime_override = target.get("version_override") or target.get("binary_override")
         if target.get("version"):
-            label = "Runtime GreptimeDB version" if target.get("version_override") else "GreptimeDB version"
+            label = "Runtime GreptimeDB version" if runtime_override else "GreptimeDB version"
             lines.append(f"- {label}: `{target.get('version')}`")
         if target.get("binary_sha256"):
-            label = "Runtime GreptimeDB binary SHA-256" if target.get("version_override") else "GreptimeDB binary SHA-256"
+            label = "Runtime GreptimeDB binary SHA-256" if runtime_override else "GreptimeDB binary SHA-256"
             lines.append(f"- {label}: `{target.get('binary_sha256')}`")
+        if target.get("binary_path"):
+            lines.append(f"- GreptimeDB binary path: `{target.get('binary_path')}`")
         if target.get("config_file"):
             lines.append(f"- GreptimeDB config file: `{target.get('config_file')}`")
-        if target.get("version_override"):
+        if runtime_override:
             lines.append(f"- Workspace-bound GreptimeDB version: `{target.get('workspace_version')}`")
             lines.append(f"- Workspace-bound binary SHA-256: `{target.get('workspace_binary_sha256')}`")
     dataset = summary.get("dataset")

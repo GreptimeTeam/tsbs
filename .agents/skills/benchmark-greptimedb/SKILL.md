@@ -18,8 +18,8 @@ verified repository-local fallback.
 1. Select a stage: `all`, `generate`, `load`, `query`, `analyze`, `summarize`,
    or `compare`.
 2. For `all`, `load`, or `query`, select exactly one target:
-   - managed: a prepared reusable `--database-id`; legacy workspaces also need
-     an explicit GreptimeDB binary;
+   - managed: a prepared reusable `--database-id`; optionally select an
+     explicit `--greptime-bin`, which legacy workspaces require;
    - external: an HTTP endpoint.
    `analyze` requires a managed target because it restarts GreptimeDB before
    every selected query type.
@@ -52,6 +52,10 @@ python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py query \
 python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py query \
   --database-id loaded-db --greptime-version 1.1.4 \
   --confirm-version-override loaded-db --dataset-id DATASET_ID
+
+python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py query \
+  --database-id loaded-db --greptime-bin ./target/release/greptime \
+  --dataset-id DATASET_ID
 
 python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py analyze \
   --profile smoke --database-id loaded-db --hot-runs 2
@@ -136,6 +140,17 @@ workspace's bound installation identity. Use `--install-root` for a non-default
 managed install root. Startup can still mutate persistent metadata, so treat
 confirmation as authorization for that compatibility risk.
 
+Use `--greptime-bin PATH` to run `all`, `load`, `query`, or `analyze` with an
+arbitrary local GreptimeDB build against a managed workspace. The explicit path
+takes precedence over the workspace-bound installation and is itself
+authorization to start that binary on the workspace; no additional confirmation
+is required. The runner resolves the path, requires an executable whose
+`--version` output contains a semantic GreptimeDB version, and records its path,
+version, and SHA-256 alongside the workspace-bound identity. It does not rewrite
+the workspace manifest. The path and checksum are pinned by the run, so pass the
+same unchanged binary when resuming. `--greptime-bin` cannot be combined with
+`--greptime-version` or an external `--endpoint`.
+
 For an independent copy, use `$setup-greptimedb` to copy the loaded workspace
 to a new database ID bound to the alternate release, then run a normal query
 against the copy. The copy uses independent bytes and additional disk space.
@@ -167,8 +182,9 @@ directly into the loader without a temporary plain file.
   verifies and discovers their version-bound binary automatically.
 - Query and analysis version overrides resolve another checksum-validated
   managed installation and record both runtime and workspace-bound identities.
-- Keep using `--greptime-bin` for legacy workspaces. Never silently adopt a
-  legacy workspace into a downloaded installation.
+- Explicit `--greptime-bin` overrides are supported for every managed execution
+  stage and record both runtime and workspace-bound identities. Keep using them
+  for legacy workspaces; never silently adopt legacy state into an installation.
 - Keep one SQL database and one loaded dataset per managed workspace. Reuse a
   matching binding without loading duplicate data.
 - Rebind only with `--database-mode reset --confirm-reset DATABASE`, after the

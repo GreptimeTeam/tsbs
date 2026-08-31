@@ -19,6 +19,16 @@ import compare as version_compare  # noqa: E402
 import summarize  # noqa: E402
 
 
+def write_fake_greptime(path: Path, version: str = "1.2.3", *, name: str = "greptime", exit_code: int = 0) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"#!/bin/sh\necho '{name} {version}'\nexit {exit_code}\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
 class StreamingInputTests(unittest.TestCase):
     def test_run_tee_decompresses_gzip_to_stdin(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -88,6 +98,24 @@ class SummaryIntegrationTests(unittest.TestCase):
         rendered = summarize.render_markdown(summary)
         self.assertIn("Runtime GreptimeDB version: `1.0.0`", rendered)
         self.assertIn("Workspace-bound GreptimeDB version: `1.1.4`", rendered)
+
+    def test_explicit_binary_identity_is_rendered(self) -> None:
+        summary = {
+            "run_id": "run", "profile": "smoke", "database": "benchmark",
+            "target": {
+                "mode": "managed", "database_id": "db-a", "version": "1.1.4",
+                "binary_sha256": "custom", "binary_path": "/tmp/greptime",
+                "binary_source": "explicit", "binary_override": True,
+                "workspace_version": "1.1.4", "workspace_binary_sha256": "release",
+                "version_override": False,
+            },
+            "ingestion_runs": [], "queries": [], "failures": [],
+        }
+        rendered = summarize.render_markdown(summary)
+        self.assertIn("Runtime GreptimeDB version: `1.1.4`", rendered)
+        self.assertIn("Runtime GreptimeDB binary SHA-256: `custom`", rendered)
+        self.assertIn("GreptimeDB binary path: `/tmp/greptime`", rendered)
+        self.assertIn("Workspace-bound binary SHA-256: `release`", rendered)
 
 
 class QuerySetIdentityTests(unittest.TestCase):
@@ -642,10 +670,10 @@ class ManagedDatabaseTests(unittest.TestCase):
             root = Path(temp)
             config_a = root / "a.toml"; config_a.write_text("max_concurrent_queries = 1\n", encoding="utf-8")
             config_b = root / "b.toml"; config_b.write_text("max_concurrent_queries = 2\n", encoding="utf-8")
-            binary = root / "greptime"; binary.write_text("binary", encoding="utf-8")
+            binary = write_fake_greptime(root / "greptime")
             parser = benchmark.make_parser()
             args = parser.parse_args([
-                "query", "--greptime-bin", "/bin/true", "--database-id", "db-a",
+                "query", "--greptime-bin", str(binary), "--database-id", "db-a",
                 "--greptime-config", str(config_a),
             ])
             benchmark.resolve_database(args); benchmark.validate_args(args)
@@ -655,14 +683,14 @@ class ManagedDatabaseTests(unittest.TestCase):
             target = benchmark.managed_target(args, manifest, binary, resolved)
             self.assertEqual(target["config_file"], str(config_a.resolve()))
 
-            resumed = parser.parse_args(["query", "--greptime-bin", "/bin/true", "--database-id", "db-a"])
+            resumed = parser.parse_args(["query", "--greptime-bin", str(binary), "--database-id", "db-a"])
             benchmark.resolve_database(resumed)
             self.assertEqual(benchmark.resolve_greptime_config(resumed, target), config_a.resolve())
             config_a.write_text("max_concurrent_queries = 3\n", encoding="utf-8")
             self.assertEqual(benchmark.resolve_greptime_config(resumed, target), config_a.resolve())
 
             changed = parser.parse_args([
-                "query", "--greptime-bin", "/bin/true", "--database-id", "db-a",
+                "query", "--greptime-bin", str(binary), "--database-id", "db-a",
                 "--greptime-config", str(config_b),
             ])
             benchmark.resolve_database(changed)
@@ -677,10 +705,11 @@ class ManagedDatabaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); run_dir = root / "run"; (run_dir / "logs").mkdir(parents=True)
             config = root / "standalone.toml"; config.write_text("max_concurrent_queries = 1\n", encoding="utf-8")
+            binary = write_fake_greptime(root / "greptime")
             database_root = root / "databases"
             parser = benchmark.make_parser()
             args = parser.parse_args([
-                "query", "--greptime-bin", sys.executable, "--database-id", "db-a",
+                "query", "--greptime-bin", str(binary), "--database-id", "db-a",
                 "--database-root", str(database_root), "--greptime-config", str(config),
             ])
             benchmark.resolve_database(args); benchmark.validate_args(args)
@@ -700,7 +729,7 @@ class ManagedDatabaseTests(unittest.TestCase):
             self.assertEqual(saved["target"]["config_file"], str(resolved_config))
 
             resumed = parser.parse_args([
-                "query", "--greptime-bin", sys.executable, "--database-id", "db-a",
+                "query", "--greptime-bin", str(binary), "--database-id", "db-a",
                 "--database-root", str(database_root),
             ])
             benchmark.resolve_database(resumed); benchmark.validate_args(resumed)
@@ -772,26 +801,106 @@ class ManagedDatabaseTests(unittest.TestCase):
             self.assertEqual(runner.call_args.kwargs["stdin_path"], input_path)
             self.assertEqual(runner.call_args.kwargs["stdin_compression"], "gzip")
 
-    def test_prepared_workspace_discovers_and_validates_binary(self) -> None:
+    def test_prepared_workspace_accepts_an_explicit_binary_without_rebinding(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); installation = root / "installations/1.1.4/linux_amd64"; installation.mkdir(parents=True)
-            binary = installation / "greptime"; binary.write_text("#!/bin/sh\n", encoding="utf-8"); binary.chmod(0o755)
+            binary = write_fake_greptime(installation / "greptime", "1.1.4")
+            explicit_binary = write_fake_greptime(root / "custom/greptime", "1.2.0-dev")
             database = root / "databases/db-a"; (database / "data").mkdir(parents=True); (database / "logs").mkdir()
-            benchmark.save_json(database / "manifest.json", {
+            original = {
                 "schema_version": 1, "kind": "greptimedb-database", "database_id": "db-a",
                 "created_at": benchmark.utc_now(), "database": "benchmark", "binding": None,
                 "version": "1.1.4", "version_source": "explicit", "platform": "linux_amd64",
                 "installation_path": str(installation), "binary_sha256": benchmark.sha256_file(binary),
-            })
+            }
+            benchmark.save_json(database / "manifest.json", original)
             args = benchmark.make_parser().parse_args(["query", "--database-id", "db-a", "--database-root", str(root / "databases"), "--database", "benchmark"])
             manifest = benchmark.validate_database_manifest(database, "db-a")
             self.assertEqual(benchmark.managed_binary(args, manifest), binary.resolve())
-            explicit = benchmark.make_parser().parse_args(["query", "--greptime-bin", "/bin/true", "--database-id", "db-a", "--database-root", str(root / "databases"), "--database", "benchmark"])
-            with self.assertRaisesRegex(benchmark.BenchmarkError, "conflicts"):
-                benchmark.managed_binary(explicit, manifest)
+            explicit = benchmark.make_parser().parse_args(["query", "--greptime-bin", str(explicit_binary), "--database-id", "db-a", "--database-root", str(root / "databases"), "--database", "benchmark"])
+            selected = benchmark.managed_binary(explicit, manifest)
+            target = benchmark.managed_target(explicit, manifest, selected)
+            self.assertEqual(selected, explicit_binary.resolve())
+            self.assertEqual(target["version"], "1.2.0-dev")
+            self.assertEqual(target["binary_path"], str(explicit_binary.resolve()))
+            self.assertEqual(target["binary_source"], "explicit")
+            self.assertTrue(target["binary_override"])
+            self.assertTrue(target["version_override"])
+            self.assertEqual(json.loads((database / "manifest.json").read_text()), original)
+
             binary.write_text("corrupt", encoding="utf-8")
             with self.assertRaisesRegex(benchmark.BenchmarkError, "checksum mismatch"):
                 benchmark.validate_database_manifest(database, "db-a")
+            _, prepared = benchmark.prepare_database_workspace(explicit)
+            self.assertEqual(prepared, original)
+
+    def test_explicit_binary_is_supported_by_every_managed_stage(self) -> None:
+        parser = benchmark.make_parser()
+        for command in ("all", "load", "query", "analyze"):
+            args = parser.parse_args([
+                command, "--database-id", "db-a", "--greptime-bin", "/tmp/greptime",
+            ])
+            benchmark.resolve_database(args)
+            benchmark.validate_args(args)
+
+        external = parser.parse_args([
+            "query", "--endpoint", "http://localhost:4000", "--greptime-bin", "/tmp/greptime",
+        ])
+        benchmark.resolve_database(external)
+        with self.assertRaisesRegex(benchmark.BenchmarkError, "external GreptimeDB"):
+            benchmark.validate_args(external)
+
+        conflicting = parser.parse_args([
+            "query", "--database-id", "db-a", "--greptime-bin", "/tmp/greptime",
+            "--greptime-version", "1.2.3",
+        ])
+        benchmark.resolve_database(conflicting)
+        with self.assertRaisesRegex(benchmark.BenchmarkError, "cannot be combined"):
+            benchmark.validate_args(conflicting)
+
+    def test_explicit_binary_requires_greptime_version_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            parser = benchmark.make_parser()
+            manifest = {"database_id": "db-a", "database": "benchmark", "binding": None}
+            for binary in (
+                write_fake_greptime(root / "wrong-name", name="other"),
+                write_fake_greptime(root / "bad-version", version="development"),
+                write_fake_greptime(root / "failed", exit_code=1),
+            ):
+                args = parser.parse_args([
+                    "query", "--database-id", "db-a", "--greptime-bin", str(binary),
+                ])
+                with self.assertRaisesRegex(benchmark.BenchmarkError, "failed version validation"):
+                    benchmark.managed_target(args, manifest, binary)
+
+            missing = root / "missing"
+            args = parser.parse_args([
+                "query", "--database-id", "db-a", "--greptime-bin", str(missing),
+            ])
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "not executable"):
+                benchmark.managed_target(args, manifest, missing)
+
+    def test_explicit_binary_path_and_contents_are_pinned_by_the_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = write_fake_greptime(root / "first/greptime", "1.2.3")
+            second = write_fake_greptime(root / "second/greptime", "1.2.3")
+            parser = benchmark.make_parser()
+            manifest = {"database_id": "db-a", "database": "benchmark", "binding": None}
+            first_args = parser.parse_args([
+                "query", "--database-id", "db-a", "--greptime-bin", str(first),
+            ])
+            second_args = parser.parse_args([
+                "query", "--database-id", "db-a", "--greptime-bin", str(second),
+            ])
+            target = benchmark.managed_target(first_args, manifest, first.resolve())
+            moved = benchmark.managed_target(second_args, manifest, second.resolve())
+            self.assertFalse(benchmark.target_matches(target, moved))
+
+            write_fake_greptime(first, "1.2.4")
+            changed = benchmark.managed_target(first_args, manifest, first.resolve())
+            self.assertFalse(benchmark.target_matches(target, changed))
 
     def test_legacy_workspace_requires_explicit_binary(self) -> None:
         manifest = {"database_id": "db-a", "database": "benchmark", "binding": None}

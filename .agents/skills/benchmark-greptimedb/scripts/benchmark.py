@@ -432,7 +432,12 @@ def database_workspace(args: argparse.Namespace) -> Path:
     return root / args.database_id
 
 
-def validate_database_manifest(path: Path, expected_id: str | None = None) -> dict[str, Any]:
+def validate_database_manifest(
+    path: Path,
+    expected_id: str | None = None,
+    *,
+    verify_prepared_binary: bool = True,
+) -> dict[str, Any]:
     manifest = read_json(path / "manifest.json")
     required = {"schema_version", "kind", "database_id", "created_at", "database", "binding"}
     if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("kind") != "greptimedb-database" or not required.issubset(manifest):
@@ -452,16 +457,21 @@ def validate_database_manifest(path: Path, expected_id: str | None = None) -> di
     if present:
         if not all(isinstance(manifest[field], str) and manifest[field] for field in setup_fields):
             raise BenchmarkError(f"malformed setup identity in database manifest: {path / 'manifest.json'}")
-        binary = Path(manifest["installation_path"]) / "greptime"
-        if not binary.is_file() or not os.access(binary, os.X_OK) or sha256_file(binary) != manifest["binary_sha256"]:
-            raise BenchmarkError(f"prepared GreptimeDB binary checksum mismatch: {binary}")
+        if verify_prepared_binary:
+            binary = Path(manifest["installation_path"]) / "greptime"
+            if not binary.is_file() or not os.access(binary, os.X_OK) or sha256_file(binary) != manifest["binary_sha256"]:
+                raise BenchmarkError(f"prepared GreptimeDB binary checksum mismatch: {binary}")
     return manifest
 
 
 def prepare_database_workspace(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     path = database_workspace(args); manifest_path = path / "manifest.json"
     if manifest_path.exists():
-        manifest = validate_database_manifest(path, args.database_id)
+        manifest = validate_database_manifest(
+            path,
+            args.database_id,
+            verify_prepared_binary=not bool(args.greptime_bin),
+        )
         if manifest["database"] != args.database:
             raise BenchmarkError("managed workspace is bound to a different SQL database")
     else:
@@ -474,6 +484,8 @@ def prepare_database_workspace(args: argparse.Namespace) -> tuple[Path, dict[str
 
 
 def managed_binary(args: argparse.Namespace, manifest: dict[str, Any]) -> Path:
+    if args.greptime_bin:
+        return args.greptime_bin.expanduser().resolve()
     prepared_path = manifest.get("installation_path")
     if prepared_path:
         requested_version = getattr(args, "greptime_version", None)
@@ -509,12 +521,33 @@ def managed_binary(args: argparse.Namespace, manifest: dict[str, Any]) -> Path:
                 raise BenchmarkError(f"alternate GreptimeDB binary failed version validation for {normalized}: {binary}")
             return binary.resolve()
         prepared = Path(prepared_path) / "greptime"
-        if args.greptime_bin and args.greptime_bin.expanduser().resolve() != prepared.resolve():
-            raise BenchmarkError("--greptime-bin conflicts with the binary bound to the prepared database workspace")
         return prepared.resolve()
-    if not args.greptime_bin:
-        raise BenchmarkError("legacy managed workspace requires --greptime-bin; prepare it with $setup-greptimedb for automatic binary discovery")
-    return args.greptime_bin.expanduser().resolve()
+    raise BenchmarkError("legacy managed workspace requires --greptime-bin; prepare it with $setup-greptimedb for automatic binary discovery")
+
+
+def explicit_binary_version(binary: Path) -> str:
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise BenchmarkError(f"explicit GreptimeDB binary is not executable: {binary}")
+    try:
+        result = subprocess.run(
+            [str(binary), "--version"],
+            cwd=binary.parent,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BenchmarkError(f"explicit GreptimeDB binary is not runnable: {binary}") from exc
+    output = f"{result.stdout}\n{result.stderr}".strip()
+    versions = [
+        token.lstrip("v")
+        for token in re.split(r"\s+", output)
+        if VERSION_RE.fullmatch(token.lstrip("v"))
+    ]
+    if result.returncode or "greptime" not in output.lower() or not versions:
+        raise BenchmarkError(f"explicit GreptimeDB binary failed version validation: {binary}")
+    return versions[0]
 
 
 def resolve_greptime_config(
@@ -542,14 +575,23 @@ def managed_target(
     binary: Path,
     config_file: Path | None = None,
 ) -> dict[str, Any]:
-    runtime_version = getattr(args, "greptime_version", None)
-    if runtime_version:
-        runtime_version = runtime_version.lstrip("v")
+    if args.greptime_bin:
+        runtime_version = explicit_binary_version(binary)
+        binary_source = "explicit"
     else:
-        runtime_version = manifest.get("version")
+        runtime_version = getattr(args, "greptime_version", None)
+        if runtime_version:
+            runtime_version = runtime_version.lstrip("v")
+            binary_source = "managed-version"
+        else:
+            runtime_version = manifest.get("version")
+            binary_source = "workspace"
     workspace_version = manifest.get("version")
     workspace_checksum = manifest.get("binary_sha256")
     runtime_checksum = sha256_file(binary)
+    prepared_path = manifest.get("installation_path")
+    workspace_binary = (Path(prepared_path) / "greptime").resolve() if prepared_path else None
+    binary_override = workspace_binary is not None and binary != workspace_binary
     target = {
         "mode": "managed",
         "endpoint": f"http://127.0.0.1:{args.http_port}",
@@ -557,8 +599,11 @@ def managed_target(
         "database_id": args.database_id,
         "version": runtime_version,
         "binary_sha256": runtime_checksum,
+        "binary_path": str(binary),
+        "binary_source": binary_source,
         "workspace_version": workspace_version,
         "workspace_binary_sha256": workspace_checksum,
+        "binary_override": binary_override,
         "version_override": bool(runtime_version and workspace_version and runtime_version != workspace_version),
     }
     if config_file is not None:
@@ -830,7 +875,7 @@ def add_run_options(parser: argparse.ArgumentParser) -> None:
 
 
 def add_connection_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--greptime-bin", type=Path); parser.add_argument("--greptime-config", type=Path, metavar="PATH", help="live GreptimeDB standalone TOML config for managed targets"); parser.add_argument("--endpoint"); parser.add_argument("--http-port", type=int, default=4000); parser.add_argument("--startup-timeout", type=int, default=60); parser.add_argument("--database", help=f"SQL database name (default: {DEFAULT_DATABASE})"); parser.add_argument("--database-id"); parser.add_argument("--database-root", type=Path)
+    parser.add_argument("--greptime-bin", type=Path, metavar="PATH", help="explicit GreptimeDB binary for a managed target"); parser.add_argument("--greptime-config", type=Path, metavar="PATH", help="live GreptimeDB standalone TOML config for managed targets"); parser.add_argument("--endpoint"); parser.add_argument("--http-port", type=int, default=4000); parser.add_argument("--startup-timeout", type=int, default=60); parser.add_argument("--database", help=f"SQL database name (default: {DEFAULT_DATABASE})"); parser.add_argument("--database-id"); parser.add_argument("--database-root", type=Path)
 
 
 def add_version_override_options(parser: argparse.ArgumentParser) -> None:
