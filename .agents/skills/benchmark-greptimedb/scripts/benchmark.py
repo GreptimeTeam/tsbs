@@ -614,9 +614,18 @@ def managed_target(
 def target_matches(existing: dict[str, Any], requested: dict[str, Any]) -> bool:
     if existing == requested:
         return True
+    legacy_fields = {"mode", "endpoint", "database", "database_id", "version", "binary_sha256"}
+    previous_fields = legacy_fields | {
+        "workspace_version",
+        "workspace_binary_sha256",
+        "version_override",
+    }
+    if previous_fields.issubset(existing) and not existing.keys() - (previous_fields | {"config_file"}):
+        if existing.get("config_file") != requested.get("config_file"):
+            return False
+        return existing == {key: requested.get(key) for key in existing}
     if requested.get("config_file") is not None:
         return False
-    legacy_fields = {"mode", "endpoint", "database", "database_id", "version", "binary_sha256"}
     return not existing.keys() - legacy_fields and existing == {key: requested.get(key) for key in existing}
 
 

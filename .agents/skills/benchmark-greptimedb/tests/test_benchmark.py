@@ -902,6 +902,31 @@ class ManagedDatabaseTests(unittest.TestCase):
             changed = benchmark.managed_target(first_args, manifest, first.resolve())
             self.assertFalse(benchmark.target_matches(target, changed))
 
+    def test_previous_managed_target_shape_remains_resumable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            installation = root / "installations/1.2.3/linux_amd64"
+            binary = write_fake_greptime(installation / "greptime", "1.2.3")
+            manifest = {
+                "database_id": "db-a", "database": "benchmark", "version": "1.2.3",
+                "installation_path": str(installation), "binary_sha256": benchmark.sha256_file(binary),
+            }
+            args = benchmark.make_parser().parse_args([
+                "query", "--database-id", "db-a", "--database", "benchmark",
+            ])
+            target = benchmark.managed_target(args, manifest, binary.resolve())
+            added_fields = {"binary_path", "binary_source", "binary_override"}
+            previous = {key: value for key, value in target.items() if key not in added_fields}
+            self.assertTrue(benchmark.target_matches(previous, target))
+
+            changed = {**target, "binary_sha256": "changed"}
+            self.assertFalse(benchmark.target_matches(previous, changed))
+
+            configured = {**target, "config_file": "/tmp/greptime.toml"}
+            self.assertFalse(benchmark.target_matches(previous, configured))
+            previous_configured = {**previous, "config_file": "/tmp/greptime.toml"}
+            self.assertTrue(benchmark.target_matches(previous_configured, configured))
+
     def test_legacy_workspace_requires_explicit_binary(self) -> None:
         manifest = {"database_id": "db-a", "database": "benchmark", "binding": None}
         args = benchmark.make_parser().parse_args(["query", "--database-id", "db-a", "--database", "benchmark"])
