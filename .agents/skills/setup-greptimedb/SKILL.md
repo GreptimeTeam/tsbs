@@ -1,6 +1,6 @@
 ---
 name: setup-greptimedb
-description: Install checksum-verified latest-stable or version-pinned GreptimeDB native releases and prepare reusable local benchmark database workspaces. Use for local GreptimeDB installation, exact-version setup, installation verification, managed TSBS workspace preparation, or locating a managed GreptimeDB binary.
+description: Install checksum-verified GreptimeDB native releases and prepare reusable file- or S3-backed benchmark workspaces. Use for GreptimeDB installation, S3 configuration, exact-version setup, managed TSBS workspace preparation, verification, or locating a managed binary.
 ---
 
 # Setup GreptimeDB
@@ -45,6 +45,33 @@ command execution time and never upgrades an existing workspace automatically.
 Do not adopt or rewrite a legacy benchmark workspace; continue using it with an
 explicit binary or choose a new database ID.
 
+### Prepare S3 storage
+
+Never ask the user to paste S3 credentials into conversation. Ask only for
+non-secret values such as bucket, root, region, and endpoint, then give the
+user a command to run in their own interactive terminal:
+
+```bash
+python3 .agents/skills/setup-greptimedb/scripts/setup.py configure-s3 \
+  --output /secure/path/greptimedb-s3.toml \
+  --bucket BUCKET --root UNIQUE_ROOT --region REGION \
+  --endpoint ENDPOINT
+```
+
+The command prompts without echo for the access key ID and secret access key,
+creates an owner-only TOML without overwriting an existing file, and prints a
+sanitized next command. If the user already maintains a full standalone TOML,
+skip generation and use it directly:
+
+```bash
+python3 .agents/skills/setup-greptimedb/scripts/setup.py prepare \
+  --database-id greptime-s3 --greptime-config /secure/path/greptimedb-s3.toml
+```
+
+The config is live and user-owned. Its bucket/root identity is immutable for
+the workspace, but credentials may be rotated in place. Do not read, quote, or
+repeat credential-bearing config contents in conversation.
+
 ## Copy a loaded workspace for another version
 
 Install the target version first, then create a fully independent database
@@ -61,7 +88,8 @@ python3 .agents/skills/setup-greptimedb/scripts/setup.py copy \
 ```
 
 The source must be a loaded setup-managed workspace and the destination must
-not exist. The command locks the source, fully copies `data/` without reflinks
+not exist. S3-backed workspaces cannot be copied; use a confirmed query-only
+version override instead. For file storage, the command locks the source, fully copies `data/` without reflinks
 or hard links, creates empty logs, preserves the SQL database and dataset
 binding, records copy provenance, and publishes atomically. It never overwrites
 or resumes a destination. Manually started GreptimeDB processes do not

@@ -1,6 +1,6 @@
 ---
 name: benchmark-greptimedb
-description: Run repeatable GreptimeDB TSBS benchmarks and collect cold and hot EXPLAIN ANALYZE VERBOSE results with shared datasets, immutable query sets, reusable managed database workspaces, independent run logs, ingestion rates, and query summaries. Use for GreptimeDB smoke or performance tests, query analysis, ingestion measurements, query comparisons, managed local instances, or external GreptimeDB endpoints.
+description: Run repeatable GreptimeDB TSBS benchmarks on file or S3 storage and collect cold/hot EXPLAIN ANALYZE VERBOSE results. Use for GreptimeDB performance tests, query analysis, ingestion measurements, storage or version comparisons, managed instances, or external endpoints.
 ---
 
 # Benchmark GreptimeDB
@@ -26,6 +26,8 @@ verified repository-local fallback.
 3. Select the SQL `--database`. For external loads, also select `create`,
    `reuse`, or explicitly confirmed `reset`. Never infer reset authorization.
 4. Use the `manual` profile unless the user requests `smoke` or overrides.
+5. For managed S3, use the config bound by `$setup-greptimedb`. Never request
+   credentials or credential-bearing TOML contents in conversation.
 
 ## Run benchmarks
 
@@ -74,6 +76,11 @@ python3 .agents/skills/benchmark-greptimedb/scripts/benchmark.py summarize \
 
 ### Custom managed configuration
 
+For a new S3 workspace, use `$setup-greptimedb configure-s3` and tell the user
+to run the generated command in their own terminal. A prepared S3 workspace
+uses its bound config automatically. `--greptime-config` may select another
+full TOML only when it has the same bucket/root identity.
+
 When the user requests GreptimeDB settings but does not provide a TOML file,
 read GreptimeDB's official [standalone example](https://github.com/GreptimeTeam/greptimedb/blob/main/config/standalone.example.toml)
 before writing the config. The full set of examples is in the upstream
@@ -102,6 +109,11 @@ reuses the recorded path; selecting another path requires a new run. The
 runner's CLI values for HTTP address, InfluxDB enablement, data home, and log
 directory override conflicting values in the TOML. Custom configs apply only
 to managed targets, not `--endpoint`.
+
+Do not create an S3 credential-bearing TOML under a tracked path or print its
+contents. Process logs redact configured access and secret keys. For S3,
+`data_home` remains local WAL/cache state; primary data resides in the configured
+bucket/root. Cold analysis restarts the process but does not clear that cache.
 
 Repeat `--query-type` to define query-set membership; omit it for every type
 allowed by `--query-scope full|fixed-host` (default `full`). The fixed-host
@@ -190,6 +202,8 @@ directly into the loader without a temporary plain file.
 - Rebind only with `--database-mode reset --confirm-reset DATABASE`, after the
   user explicitly authorizes dropping that SQL database.
 - Managed workspaces are locked while GreptimeDB uses them.
+- Storage identity is immutable. Reset drops/recreates the SQL database and
+  never directly empties a bucket or prefix.
 - For external loads, `reuse` can duplicate data. Prefer query-only runs after
   one successful load.
 
@@ -197,7 +211,7 @@ directly into the loader without a temporary plain file.
 
 Read `summary.json` and report the dataset ID and checksum, query-set ID and
 manifest checksum, database ID or external target, custom config path when
-present, metrics/second and
+present, sanitized storage type/location, metrics/second and
 rows/second for ingestion, weighted mean latency per query type, failures and
 their log paths, and the run directory. Preserve failed-run diagnostics.
 For analysis, also report each query type's attempt and cold/hot result paths,

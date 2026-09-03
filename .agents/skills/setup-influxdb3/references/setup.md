@@ -1,4 +1,4 @@
-# InfluxDB 3 local setup reference
+# InfluxDB 3 managed setup reference
 
 ## Workspace
 
@@ -30,6 +30,13 @@ Intel macOS and Windows are intentionally unsupported by the managed workflow.
 - Derive a stable node ID from the database ID.
 - Add a distinct stable cluster ID for Enterprise.
 - Use `--without-auth` for isolated managed benchmark databases.
+
+S3 workspaces instead use `--object-store=s3`, a bucket, region, optional
+compatible endpoint/HTTP opt-in, and a user-owned native AWS credentials JSON.
+They do not pass `--data-dir`. Manifests pin only the credentials-file path and
+non-secret storage settings; file contents may rotate in place and are never
+copied, checksummed, printed, or placed in process environment variables.
+Manifests without a storage field remain file-backed.
 
 Enterprise requires an active license. Trial/home activation supplies the email
 and license type only to the server process; neither value is written to the

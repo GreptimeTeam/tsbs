@@ -56,7 +56,8 @@ request exceeded 10 MiB, so do not assume arbitrarily larger batches are valid.
 ## Database and target state
 
 Managed database manifests pin the database ID, edition, exact version, binary
-checksum, node/cluster identity, SQL database, and one loaded dataset checksum. External
+checksum, node/cluster identity, sanitized file/S3 storage identity, SQL database,
+and one loaded dataset checksum. External
 targets require an explicit edition and may provide multiple URLs only when all
 URLs address the same Core instance or Enterprise cluster. The runner compares
 available `/ping` version metadata but cannot prove cluster membership. Use at

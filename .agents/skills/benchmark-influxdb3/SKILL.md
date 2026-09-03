@@ -1,6 +1,6 @@
 ---
 name: benchmark-influxdb3
-description: Run repeatable InfluxDB 3 Core and Enterprise TSBS benchmarks with shared datasets, immutable SQL query sets, reusable managed database workspaces, external clusters, independent logs, ingestion rates, and query-latency summaries. Use for InfluxDB 3 smoke or performance tests, Core-versus-Enterprise measurements, ingestion tests, query comparisons, or external InfluxDB 3 endpoints.
+description: Run repeatable InfluxDB 3 Core and Enterprise TSBS benchmarks on file or S3 storage. Use for smoke or performance tests, storage or edition comparisons, ingestion tests, query measurements, managed workspaces, or external endpoints.
 ---
 
 # Benchmark InfluxDB 3
@@ -27,6 +27,8 @@ the verified repository-local fallback.
    the measured non-durable throughput recipe, pass `--batch-size 3000`,
    `--load-workers 8`, and `--no-sync`; see
    `docs/influx3-ingestion-benchmark.md`.
+6. Managed S3 settings come from the prepared workspace. Use
+   `$setup-influxdb3 configure-s3`; never request credentials in conversation.
 
 ## Run benchmarks
 
@@ -74,6 +76,11 @@ Managed servers may take several minutes to initialize, so the runner waits up
 to 10 minutes by default. Override this with `--startup-timeout SECONDS` when a
 different allowance is required.
 
+S3-backed managed servers pass the user-owned native credentials file directly
+to InfluxDB and keep only logs locally. Credentials are never copied into run
+metadata or environment variables. Bucket, region, endpoint, and HTTP allowance
+are pinned by the workspace and reported without secret values.
+
 ## Authenticate external targets
 
 Set `INFLUXDB3_AUTH_TOKEN` for writes and queries and
@@ -94,11 +101,14 @@ to the same instance or cluster.
 - Rebind only with `--database-mode reset --confirm-reset DATABASE` after the
   user explicitly authorizes deletion.
 - Managed database workspaces remain locked while their server is running.
+- Storage identity is immutable. Reset uses the database API and never directly
+  empties an object-store bucket.
 - External `reuse` may duplicate data; prefer query-only runs after one load.
 
 ## Report results
 
-Read `summary.json` and report edition, version, database ID or URLs, dataset and
+Read `summary.json` and report edition, version, database ID or URLs, sanitized
+storage type/location, dataset and
 query-set checksums, durability flags, metrics/second and rows/second, weighted
 mean query latency, server diagnostics, failures and log paths, and the run
 directory. Ordinary server warnings and recoverable errors are diagnostics;

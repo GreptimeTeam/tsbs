@@ -203,6 +203,36 @@ class DatabaseTests(unittest.TestCase):
             with mock.patch.object(setup, "platform_tag", return_value="linux_amd64"), self.assertRaisesRegex(setup.SetupError, "already exists"):
                 setup.copy_database(args)
 
+    def test_s3_config_is_secret_only_and_binds_workspace_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); output = root / "greptime-s3.toml"
+            args = setup.make_parser().parse_args([
+                "configure-s3", "--output", str(output), "--bucket", "bench",
+                "--root", "greptime/db-a", "--region", "us-west-1",
+                "--endpoint", "http://minio:9000",
+            ])
+            stdin = mock.Mock(); stdin.isatty.return_value = True
+            with mock.patch.object(setup.sys, "stdin", stdin), mock.patch.object(
+                setup.getpass, "getpass", side_effect=["access-value", "secret-value", "secret-value"]
+            ):
+                generated = setup.configure_s3(args)
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn("access-value", json.dumps(generated))
+            self.assertNotIn("secret-value", json.dumps(generated))
+
+            self.make_installation(root)
+            prepare_args = self.args(root); prepare_args.greptime_config = output
+            with mock.patch.object(setup, "platform_tag", return_value="linux_amd64"):
+                prepared = setup.prepare(prepare_args)
+            persisted = json.dumps(setup.read_json(Path(prepared["database_path"]) / "manifest.json"))
+            self.assertNotIn("access-value", persisted)
+            self.assertNotIn("secret-value", persisted)
+            self.assertEqual(prepared["storage"]["bucket"], "bench")
+
+            output.write_text(output.read_text().replace('bucket = "bench"', 'bucket = "other"'), encoding="utf-8")
+            with self.assertRaisesRegex(setup.SetupError, "no longer matches"):
+                setup.validate_database(Path(prepared["database_path"]), "db-a")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 ---
 name: setup-influxdb3
-description: Install checksum-verified latest or version-pinned InfluxDB 3 Core or Enterprise native distributions and prepare reusable local benchmark database workspaces. Use for local InfluxDB 3 installation, database setup, Enterprise trial/home activation, license-file setup, installation verification, or locating a managed binary for TSBS.
+description: Install checksum-verified InfluxDB 3 Core or Enterprise distributions and prepare reusable file- or S3-backed benchmark workspaces. Use for installation, guided S3 configuration, database setup, Enterprise licensing, verification, or locating a managed binary for TSBS.
 ---
 
 # Setup InfluxDB 3
@@ -37,10 +37,40 @@ python3 .agents/skills/setup-influxdb3/scripts/setup.py prepare \
   --database-id enterprise-311 --edition enterprise --version 3.11.1
 ```
 
-Database workspaces use a file object store and stable node/cluster identifiers.
+Database workspaces use a file object store by default and stable node/cluster identifiers.
 Existing workspaces are immutable with respect to edition, version, and binary checksum.
 Omitting `--version` resolves the official latest at command execution time;
 it never upgrades an existing database workspace automatically.
+
+### Prepare S3 storage
+
+Never ask the user to paste S3 credentials into conversation. Ask only for
+non-secret bucket, region, endpoint, and HTTP compatibility choices, then give
+the user a local interactive command:
+
+```bash
+python3 .agents/skills/setup-influxdb3/scripts/setup.py configure-s3 \
+  --output /secure/path/influxdb3-s3-credentials.json \
+  --bucket BUCKET --aws-default-region REGION \
+  --aws-endpoint ENDPOINT --aws-allow-http
+```
+
+The command prompts without echo, writes an owner-only native AWS credentials
+JSON without overwriting, and prints a sanitized `prepare` command.
+`--aws-allow-http` is required for an HTTP endpoint. Existing native credential
+files can be supplied directly:
+
+```bash
+python3 .agents/skills/setup-influxdb3/scripts/setup.py prepare \
+  --database-id core-s3 --edition core --object-store s3 \
+  --bucket BUCKET --aws-credentials-file /secure/path/aws.json \
+  --aws-default-region REGION
+```
+
+The file must contain `aws_access_key_id` and `aws_secret_access_key`; optional
+fields are `aws_session_token` and `expiry`. Never read, quote, or repeat its
+contents in conversation. Bucket/endpoint identity is immutable while the file
+contents may rotate in place.
 
 ## Activate Enterprise
 
@@ -76,6 +106,6 @@ python3 .agents/skills/setup-influxdb3/scripts/setup.py inspect --database-id co
 python3 .agents/skills/setup-influxdb3/scripts/setup.py verify --database-id core-311
 ```
 
-Report the database ID, edition, exact version, binary path and checksum, and
-Enterprise license status. Do not add the binary to `PATH` or alter system
+Report the database ID, edition, exact version, binary path and checksum,
+storage type/location, and Enterprise license status. Do not add the binary to `PATH` or alter system
 packages or services.

@@ -7,11 +7,13 @@ import argparse
 import contextlib
 import datetime as dt
 import fcntl
+import getpass
 import hashlib
 import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -24,6 +26,11 @@ from typing import Any, Iterator, Sequence
 
 
 SCRIPT_PATH = Path(__file__).resolve()
+sys.path.insert(0, str(SCRIPT_PATH.parents[3] / "lib"))
+
+import tomli  # noqa: E402
+
+
 REPO_ROOT = SCRIPT_PATH.parents[4]
 DEFAULT_ROOT = REPO_ROOT / ".benchmarks" / "greptimedb"
 DEFAULT_INSTALL_ROOT = DEFAULT_ROOT / "installations"
@@ -62,6 +69,125 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise SetupError(f"manifest must be an object: {path}")
     return value
+
+
+def save_private_text(path: Path, value: str) -> None:
+    path = path.expanduser().resolve()
+    if not path.parent.is_dir():
+        raise SetupError(f"output parent directory does not exist: {path.parent}")
+    if path.exists() or path.is_symlink():
+        raise SetupError(f"refusing to overwrite existing S3 config: {path}")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise SetupError(f"refusing to overwrite existing S3 config: {path}") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def prompt_value(label: str, value: str | None = None, *, required: bool = True) -> str:
+    value = value.strip() if value is not None else ""
+    if not value:
+        value = input(f"{label}: ").strip()
+    if required and not value:
+        raise SetupError(f"{label} must not be empty")
+    return value
+
+
+def prompt_secret(label: str, *, confirm: bool = False) -> str:
+    value = getpass.getpass(f"{label}: ")
+    if not value:
+        raise SetupError(f"{label} must not be empty")
+    if confirm and getpass.getpass(f"Confirm {label}: ") != value:
+        raise SetupError(f"{label} confirmation does not match")
+    return value
+
+
+def read_greptime_storage_config(path: Path, *, require_credentials: bool = True) -> tuple[dict[str, Any], tuple[str, ...]]:
+    path = path.expanduser().resolve()
+    try:
+        with path.open("rb") as stream:
+            document = tomli.load(stream)
+    except FileNotFoundError as exc:
+        raise SetupError(f"GreptimeDB config file does not exist: {path}") from exc
+    except tomli.TOMLDecodeError as exc:
+        raise SetupError(f"invalid GreptimeDB TOML config {path}: {exc}") from exc
+    storage = document.get("storage")
+    if not isinstance(storage, dict):
+        raise SetupError("GreptimeDB S3 config requires a [storage] table")
+    storage_type = storage.get("type", "File")
+    if not isinstance(storage_type, str) or storage_type.lower() not in ("file", "s3"):
+        raise SetupError("GreptimeDB managed storage type must be File or S3")
+    if storage_type.lower() == "file":
+        return {"type": "file", "config_file": str(path)}, ()
+    required = ("bucket", "root")
+    if require_credentials:
+        required += ("access_key_id", "secret_access_key")
+    for key in required:
+        if not isinstance(storage.get(key), str) or not storage[key]:
+            raise SetupError(f"GreptimeDB S3 config requires nonempty storage.{key}")
+    virtual_host = storage.get("enable_virtual_host_style", False)
+    if not isinstance(virtual_host, bool):
+        raise SetupError("storage.enable_virtual_host_style must be a boolean")
+    identity = {
+        "type": "s3",
+        "config_file": str(path),
+        "bucket": storage["bucket"],
+        "root": storage["root"],
+        "endpoint": storage.get("endpoint"),
+        "region": storage.get("region"),
+        "enable_virtual_host_style": virtual_host,
+    }
+    secrets = tuple(
+        storage[key]
+        for key in ("access_key_id", "secret_access_key")
+        if isinstance(storage.get(key), str) and storage[key]
+    )
+    return identity, secrets
+
+
+def configure_s3(args: argparse.Namespace) -> dict[str, Any]:
+    if not sys.stdin.isatty():
+        raise SetupError("configure-s3 requires an interactive terminal; do not provide S3 credentials through redirected input")
+    bucket = prompt_value("S3 bucket", args.bucket)
+    root = prompt_value("S3 root prefix", args.root)
+    region = prompt_value("S3 region (optional)", args.region, required=False)
+    endpoint = prompt_value("S3 endpoint (optional)", args.endpoint, required=False)
+    access_key_id = prompt_secret("S3 access key ID")
+    secret_access_key = prompt_secret("S3 secret access key", confirm=True)
+    lines = [
+        "[storage]",
+        'type = "S3"',
+        f"bucket = {json.dumps(bucket)}",
+        f"root = {json.dumps(root)}",
+    ]
+    if region:
+        lines.append(f"region = {json.dumps(region)}")
+    if endpoint:
+        lines.append(f"endpoint = {json.dumps(endpoint)}")
+    lines.extend([
+        f"access_key_id = {json.dumps(access_key_id)}",
+        f"secret_access_key = {json.dumps(secret_access_key)}",
+    ])
+    if args.enable_virtual_host_style:
+        lines.append("enable_virtual_host_style = true")
+    output = args.output.expanduser().resolve()
+    save_private_text(output, "\n".join(lines) + "\n")
+    return {
+        "config_file": str(output),
+        "next_command": (
+            "python3 .agents/skills/setup-greptimedb/scripts/setup.py prepare "
+            f"--database-id DATABASE_ID --greptime-config {shlex.quote(str(output))}"
+        ),
+    }
 
 
 def sha256_file(path: Path) -> str:
@@ -354,18 +480,29 @@ def validate_database(path: Path, expected_id: str | None = None) -> dict[str, A
     installed = validate_installation(installation, manifest["version"])
     if installed["platform"] != manifest["platform"] or installed["binary_sha256"] != manifest["binary_sha256"]:
         raise SetupError("database installation identity mismatch")
+    storage = manifest.get("storage", {"type": "file"})
+    if not isinstance(storage, dict) or storage.get("type") not in ("file", "s3"):
+        raise SetupError("database storage identity is malformed")
+    if storage["type"] == "s3":
+        current, _ = read_greptime_storage_config(Path(storage.get("config_file", "")))
+        if current != storage:
+            raise SetupError("GreptimeDB S3 config no longer matches the workspace storage identity")
+    manifest["storage"] = storage
     return manifest
 
 
 def prepare(args: argparse.Namespace) -> dict[str, Any]:
     installation = installation_path(args); installed = validate_installation(installation, args.version)
+    storage = {"type": "file"}
+    if getattr(args, "greptime_config", None):
+        storage, _ = read_greptime_storage_config(args.greptime_config)
     path = database_path(args); manifest_path = path / "manifest.json"
     if manifest_path.exists():
         manifest = validate_database(path, args.database_id)
-        expected = (args.version, installed["platform"], installed["binary_sha256"], args.database)
-        actual = (manifest["version"], manifest["platform"], manifest["binary_sha256"], manifest["database"])
+        expected = (args.version, installed["platform"], installed["binary_sha256"], args.database, storage)
+        actual = (manifest["version"], manifest["platform"], manifest["binary_sha256"], manifest["database"], manifest["storage"])
         if actual != expected:
-            raise SetupError("database is already bound to another version, binary, platform, or SQL database")
+            raise SetupError("database is already bound to another version, binary, platform, SQL database, or storage identity")
         return {**manifest, "database_path": str(path), "reused": True}
     if path.exists() and any(path.iterdir()):
         raise SetupError(f"database workspace exists without a setup-compatible manifest: {path}")
@@ -375,6 +512,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         "version": args.version, "version_source": args.version_source, "platform": installed["platform"],
         "installation_path": str(installation), "binary_sha256": installed["binary_sha256"],
         "created_at": utc_now(), "updated_at": utc_now(), "database": args.database, "binding": None,
+        "storage": storage,
     }
     save_json(manifest_path, manifest)
     return {**manifest, "database_path": str(path), "reused": False}
@@ -396,6 +534,8 @@ def copy_database(args: argparse.Namespace) -> dict[str, Any]:
     try:
         with lock_database(source):
             source_manifest = validate_database(source, args.source_database_id)
+            if source_manifest["storage"]["type"] == "s3":
+                raise SetupError("copy is not supported for S3-backed GreptimeDB workspaces; use a query-only version override")
             if source_manifest["binding"] is None:
                 raise SetupError("source database workspace has no loaded dataset binding")
             if installed["platform"] != source_manifest["platform"]:
@@ -423,6 +563,7 @@ def copy_database(args: argparse.Namespace) -> dict[str, Any]:
                 "updated_at": copied_at,
                 "database": source_manifest["database"],
                 "binding": source_manifest["binding"],
+                "storage": {"type": "file"},
                 "copied_from": {
                     "database_id": source_manifest["database_id"],
                     "database_path": str(source),
@@ -451,8 +592,9 @@ def print_value(value: Any) -> None:
 
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__); sub = parser.add_subparsers(dest="command", required=True)
+    configure_parser = sub.add_parser("configure-s3"); configure_parser.add_argument("--output", required=True, type=Path); configure_parser.add_argument("--bucket"); configure_parser.add_argument("--root"); configure_parser.add_argument("--region"); configure_parser.add_argument("--endpoint"); configure_parser.add_argument("--enable-virtual-host-style", action="store_true")
     install_parser = sub.add_parser("install"); install_parser.add_argument("--version"); install_parser.add_argument("--install-root", type=Path); install_parser.add_argument("--reinstall", action="store_true")
-    prepare_parser = sub.add_parser("prepare"); prepare_parser.add_argument("--database-id", required=True); prepare_parser.add_argument("--version"); prepare_parser.add_argument("--database", default="benchmark"); prepare_parser.add_argument("--install-root", type=Path); prepare_parser.add_argument("--database-root", type=Path)
+    prepare_parser = sub.add_parser("prepare"); prepare_parser.add_argument("--database-id", required=True); prepare_parser.add_argument("--version"); prepare_parser.add_argument("--database", default="benchmark"); prepare_parser.add_argument("--install-root", type=Path); prepare_parser.add_argument("--database-root", type=Path); prepare_parser.add_argument("--greptime-config", type=Path)
     copy_parser = sub.add_parser("copy"); copy_parser.add_argument("--source-database-id", required=True); copy_parser.add_argument("--database-id", required=True); copy_parser.add_argument("--version", required=True); copy_parser.add_argument("--install-root", type=Path); copy_parser.add_argument("--database-root", type=Path)
     list_parser = sub.add_parser("list"); list_parser.add_argument("--database-root", type=Path)
     inspect_parser = sub.add_parser("inspect"); inspect_parser.add_argument("--database-id", required=True); inspect_parser.add_argument("--database-root", type=Path)
@@ -477,7 +619,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         validate_args(args)
         if args.command in ("install", "prepare", "copy"):
             resolve_args_version(args)
-        if args.command == "install":
+        if args.command == "configure-s3":
+            value = configure_s3(args)
+        elif args.command == "install":
             value = install(args)
         elif args.command == "prepare":
             value = prepare(args)

@@ -133,6 +133,28 @@ class SummaryIntegrationTests(unittest.TestCase):
         self.assertIn("managed:db-a", rendered)
         self.assertIn("set-a", rendered)
 
+    def test_external_target_storage_is_rendered_as_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            summary = summarize.build_summary(
+                Path(temp),
+                {
+                    "run_id": "run",
+                    "profile": "smoke",
+                    "database": "benchmark",
+                    "target": {
+                        "mode": "external",
+                        "urls": ["http://localhost:8181"],
+                        "edition": "core",
+                        "storage": None,
+                    },
+                    "events": {"loads": [], "queries": [], "servers": []},
+                },
+            )
+
+        rendered = summarize.render_markdown(summary)
+        self.assertIn("Storage: `unknown`", rendered)
+        self.assertNotIn("Storage: `file`", rendered)
+
 
 class QuerySetIdentityTests(unittest.TestCase):
     def dataset(self) -> dict:
@@ -442,6 +464,62 @@ class ManagedDatabaseTests(unittest.TestCase):
             persisted = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
             self.assertIsNone(persisted["database"])
             self.assertIsNone(persisted["binding"])
+
+    def test_s3_credentials_reject_server_incompatible_optional_types(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            credentials = Path(temp) / "aws.json"
+            required = {
+                "aws_access_key_id": "access-value",
+                "aws_secret_access_key": "secret-value",
+            }
+            for field, value in (("aws_session_token", 123), ("expiry", "123")):
+                with self.subTest(field=field):
+                    credentials.write_text(json.dumps({**required, field: value}), encoding="utf-8")
+                    with self.assertRaisesRegex(benchmark.BenchmarkError, field):
+                        benchmark.read_aws_credentials(credentials)
+
+    def test_s3_managed_connection_uses_credentials_file_and_scrubs_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); path = self.prepare_database(root)
+            credentials = root / "aws.json"
+            credentials.write_text(json.dumps({
+                "aws_access_key_id": "access-value",
+                "aws_secret_access_key": "secret-value",
+            }), encoding="utf-8")
+            database = benchmark.read_json(path / "manifest.json")
+            database["storage"] = {
+                "type": "s3", "bucket": "bench", "credentials_file": str(credentials),
+                "region": "us-west-1", "endpoint": "http://minio:9000", "allow_http": True,
+            }
+            benchmark.save_json(path / "manifest.json", database)
+            args = benchmark.make_parser().parse_args([
+                "query", "--database-id", "db-a", "--database-root", str(root),
+            ])
+            benchmark.resolve_database(args)
+            run_dir = root / "run"; (run_dir / "logs").mkdir(parents=True)
+            manifest = {"events": {"servers": []}}
+            process = mock.Mock(pid=1234); process.poll.return_value = None; process.wait.return_value = 0
+
+            def start_process(command, **kwargs):
+                kwargs["stdout"].write("startup secret-value access-value\n")
+                kwargs["stdout"].flush()
+                return process
+
+            with mock.patch.object(benchmark, "preflight_managed_binary"), mock.patch.object(benchmark, "check_port_available"), mock.patch.object(
+                benchmark, "endpoint_ready", return_value=True
+            ), mock.patch.object(benchmark.subprocess, "Popen", side_effect=start_process) as popen, mock.patch.object(
+                benchmark.os, "killpg"
+            ):
+                with benchmark.connection(args, run_dir, manifest):
+                    pass
+            command = popen.call_args.args[0]
+            self.assertIn("--object-store=s3", command)
+            self.assertIn(f"--aws-credentials-file={credentials}", command)
+            self.assertFalse(any(part.startswith("--data-dir=") for part in command))
+            process_log = next((run_dir / "logs").glob("influxdb3-process-run-*.log"))
+            contents = process_log.read_text(encoding="utf-8")
+            self.assertNotIn("access-value", contents)
+            self.assertNotIn("secret-value", contents)
 
 
 class TargetTests(unittest.TestCase):

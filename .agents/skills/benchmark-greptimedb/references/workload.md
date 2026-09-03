@@ -11,7 +11,7 @@
 └── greptimedb/
     ├── installations/<version>/<platform>/{manifest.json,greptime,...}
     ├── configs/<descriptive-name>.toml
-    ├── databases/<database-id>/{manifest.json,data/,logs/}
+    ├── databases/<database-id>/{manifest.json,data/,logs/} # data is WAL/cache for S3
     ├── runs/<run-id>/
     │   ├── manifest.json
     │   ├── summary.{json,md}
@@ -111,6 +111,11 @@ the workspace-bound identity, making separate runs safe to compare without
 rebinding metadata. A custom managed configuration records only its resolved
 live source path. Its contents are read again on every server start and are not
 copied or checksum-pinned by the runner.
+
+Managed storage identity is `file` for legacy manifests. S3 workspaces pin the
+non-secret bucket, root, endpoint, and region plus the live config path. Runs
+record the sanitized identity. SQL reset never directly deletes a bucket or
+prefix, and cold analysis does not clear the local object cache.
 
 Copied workspaces retain the source dataset binding and record their origin,
 source manifest checksum, full-copy method, and copied file and byte counts.

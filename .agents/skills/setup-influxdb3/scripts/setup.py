@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install and prepare reusable local InfluxDB 3 database workspaces."""
+"""Install InfluxDB 3 and prepare reusable file- or S3-backed workspaces."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -21,6 +22,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
@@ -66,6 +68,183 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise SetupError(f"manifest must be an object: {path}")
     return value
+
+
+def save_private_json(path: Path, value: dict[str, Any]) -> None:
+    path = path.expanduser().resolve()
+    if not path.parent.is_dir():
+        raise SetupError(f"output parent directory does not exist: {path.parent}")
+    if path.exists() or path.is_symlink():
+        raise SetupError(f"refusing to overwrite existing S3 credentials file: {path}")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise SetupError(f"refusing to overwrite existing S3 credentials file: {path}") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def prompt_value(label: str, value: str | None = None, *, required: bool = True) -> str:
+    value = value.strip() if value is not None else ""
+    if not value:
+        value = input(f"{label}: ").strip()
+    if required and not value:
+        raise SetupError(f"{label} must not be empty")
+    return value
+
+
+def prompt_secret(label: str, *, required: bool = True, confirm: bool = False) -> str:
+    value = getpass.getpass(f"{label}: ")
+    if required and not value:
+        raise SetupError(f"{label} must not be empty")
+    if confirm and getpass.getpass(f"Confirm {label}: ") != value:
+        raise SetupError(f"{label} confirmation does not match")
+    return value
+
+
+def read_aws_credentials(path: Path) -> tuple[Path, tuple[str, ...]]:
+    path = path.expanduser().resolve()
+    document = read_json(path)
+    for key in ("aws_access_key_id", "aws_secret_access_key"):
+        if not isinstance(document.get(key), str) or not document[key]:
+            raise SetupError(f"InfluxDB S3 credentials file requires nonempty {key}")
+    if "aws_session_token" in document and not isinstance(document["aws_session_token"], str):
+        raise SetupError("InfluxDB S3 credentials field aws_session_token must be a string")
+    if "expiry" in document and (
+        isinstance(document["expiry"], bool)
+        or not isinstance(document["expiry"], int)
+        or not 0 <= document["expiry"] <= 2**64 - 1
+    ):
+        raise SetupError("InfluxDB S3 credentials field expiry must be an unsigned 64-bit integer")
+    secrets = tuple(
+        str(document[key])
+        for key in ("aws_access_key_id", "aws_secret_access_key", "aws_session_token")
+        if document.get(key)
+    )
+    return path, secrets
+
+
+def configure_s3(args: argparse.Namespace) -> dict[str, Any]:
+    if not sys.stdin.isatty():
+        raise SetupError("configure-s3 requires an interactive terminal; do not provide S3 credentials through redirected input")
+    bucket = prompt_value("S3 bucket", args.bucket)
+    region = prompt_value("S3 region", args.aws_default_region or "us-east-1")
+    endpoint = prompt_value("S3 endpoint (optional)", args.aws_endpoint, required=False)
+    if endpoint:
+        parsed = urllib.parse.urlparse(endpoint)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise SetupError("--aws-endpoint must be an absolute HTTP or HTTPS URL")
+        if parsed.scheme == "http" and not args.aws_allow_http:
+            raise SetupError("an HTTP S3 endpoint requires --aws-allow-http")
+    access_key_id = prompt_secret("S3 access key ID")
+    secret_access_key = prompt_secret("S3 secret access key", confirm=True)
+    session_token = prompt_secret("S3 session token (optional)", required=False)
+    credentials = {
+        "aws_access_key_id": access_key_id,
+        "aws_secret_access_key": secret_access_key,
+    }
+    if session_token:
+        credentials["aws_session_token"] = session_token
+    output = args.output.expanduser().resolve()
+    save_private_json(output, credentials)
+    options = [
+        "python3 .agents/skills/setup-influxdb3/scripts/setup.py prepare",
+        "--database-id DATABASE_ID --edition EDITION --object-store s3",
+        f"--bucket {shlex.quote(bucket)}",
+        f"--aws-credentials-file {shlex.quote(str(output))}",
+        f"--aws-default-region {shlex.quote(region)}",
+    ]
+    if endpoint:
+        options.append(f"--aws-endpoint {shlex.quote(endpoint)}")
+    if args.aws_allow_http:
+        options.append("--aws-allow-http")
+    return {"credentials_file": str(output), "next_command": " ".join(options)}
+
+
+def storage_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    object_store = getattr(args, "object_store", None) or "file"
+    s3_values = (
+        getattr(args, "bucket", None),
+        getattr(args, "aws_credentials_file", None),
+        getattr(args, "aws_endpoint", None),
+        getattr(args, "aws_allow_http", False),
+    )
+    if object_store == "file":
+        if any(s3_values):
+            raise SetupError("S3 options require --object-store s3")
+        return {"type": "file"}
+    bucket = getattr(args, "bucket", None)
+    credentials_file = getattr(args, "aws_credentials_file", None)
+    if not bucket or not credentials_file:
+        raise SetupError("S3 storage requires --bucket and --aws-credentials-file")
+    credentials_path, _ = read_aws_credentials(credentials_file)
+    endpoint = getattr(args, "aws_endpoint", None)
+    if endpoint:
+        parsed = urllib.parse.urlparse(endpoint)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise SetupError("--aws-endpoint must be an absolute HTTP or HTTPS URL")
+        if parsed.scheme == "http" and not getattr(args, "aws_allow_http", False):
+            raise SetupError("an HTTP S3 endpoint requires --aws-allow-http")
+    return {
+        "type": "s3",
+        "bucket": bucket,
+        "credentials_file": str(credentials_path),
+        "region": getattr(args, "aws_default_region", None) or "us-east-1",
+        "endpoint": endpoint,
+        "allow_http": bool(getattr(args, "aws_allow_http", False)),
+    }
+
+
+def validate_storage(storage: Any) -> dict[str, Any]:
+    if storage is None:
+        return {"type": "file"}
+    if not isinstance(storage, dict) or storage.get("type") not in ("file", "s3"):
+        raise SetupError("database storage identity is malformed")
+    if storage["type"] == "s3":
+        required = {"bucket", "credentials_file", "region", "endpoint", "allow_http"}
+        if (
+            not required.issubset(storage)
+            or not isinstance(storage["bucket"], str)
+            or not storage["bucket"]
+            or not isinstance(storage["region"], str)
+            or not storage["region"]
+            or storage["endpoint"] is not None and not isinstance(storage["endpoint"], str)
+            or not isinstance(storage["allow_http"], bool)
+        ):
+            raise SetupError("database S3 storage identity is malformed")
+        if storage["endpoint"]:
+            parsed = urllib.parse.urlparse(storage["endpoint"])
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                raise SetupError("database S3 endpoint is malformed")
+            if parsed.scheme == "http" and not storage["allow_http"]:
+                raise SetupError("database HTTP S3 endpoint requires allow_http")
+        read_aws_credentials(Path(storage["credentials_file"]))
+    return storage
+
+
+def storage_command(storage: dict[str, Any], data_path: Path) -> list[str]:
+    if storage["type"] == "file":
+        return ["--object-store=file", f"--data-dir={data_path}"]
+    command = [
+        "--object-store=s3",
+        f"--bucket={storage['bucket']}",
+        f"--aws-credentials-file={storage['credentials_file']}",
+        f"--aws-default-region={storage['region']}",
+    ]
+    if storage.get("endpoint"):
+        command.append(f"--aws-endpoint={storage['endpoint']}")
+    if storage.get("allow_http"):
+        command.append("--aws-allow-http")
+    return command
 
 
 def sha256_file(path: Path) -> str:
@@ -351,19 +530,21 @@ def validate_database(path: Path, expected_id: str | None = None) -> dict[str, A
     installed = validate_installation(installation, manifest["edition"], manifest["version"])
     if installed["binary_sha256"] != manifest["binary_sha256"]:
         raise SetupError("database installation checksum mismatch")
+    manifest["storage"] = validate_storage(manifest.get("storage"))
     return manifest
 
 
 def prepare(args: argparse.Namespace) -> dict[str, Any]:
     installation = installation_path(args)
     installed = validate_installation(installation, args.edition, args.version)
+    storage = storage_from_args(args)
     path = database_path(args)
     if (path / "manifest.json").exists():
         manifest = validate_database(path, args.database_id)
-        identity = (manifest["edition"], manifest["version"], manifest["binary_sha256"])
-        expected = (args.edition, args.version, installed["binary_sha256"])
+        identity = (manifest["edition"], manifest["version"], manifest["binary_sha256"], manifest["storage"])
+        expected = (args.edition, args.version, installed["binary_sha256"], storage)
         if identity != expected:
-            raise SetupError("database is already bound to another edition, version, or binary")
+            raise SetupError("database is already bound to another edition, version, binary, or storage identity")
         return {**manifest, "database_path": str(path), "reused": True}
     path.mkdir(parents=True, exist_ok=True)
     (path / "data").mkdir(); (path / "logs").mkdir()
@@ -375,7 +556,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         "installation_path": str(installation), "binary_sha256": installed["binary_sha256"],
         "node_id": f"{stem}-node", "cluster_id": f"{stem}-cluster" if args.edition == "enterprise" else None,
         "created_at": utc_now(), "updated_at": utc_now(), "license": {"status": "not-required" if args.edition == "core" else "unconfigured", "source": None},
-        "database": None, "binding": None,
+        "database": None, "binding": None, "storage": storage,
     }
     save_json(path / "manifest.json", manifest)
     return {**manifest, "database_path": str(path), "reused": False}
@@ -453,7 +634,7 @@ def activate(args: argparse.Namespace) -> dict[str, Any]:
     if not wait_port_available(args.http_port):
         raise SetupError(f"HTTP port {args.http_port} is unavailable")
     installation = Path(manifest["installation_path"]); binary = installation / "influxdb3"
-    command = [str(binary), "serve", "--object-store=file", f"--data-dir={path / 'data'}", f"--node-id={manifest['node_id']}", f"--cluster-id={manifest['cluster_id']}", f"--http-bind=127.0.0.1:{args.http_port}", "--without-auth"]
+    command = [str(binary), "serve", *storage_command(manifest["storage"], path / "data"), f"--node-id={manifest['node_id']}", f"--cluster-id={manifest['cluster_id']}", f"--http-bind=127.0.0.1:{args.http_port}", "--without-auth"]
     env = os.environ.copy(); source: str
     if args.license_file:
         license_file = args.license_file.expanduser().resolve()
@@ -466,7 +647,10 @@ def activate(args: argparse.Namespace) -> dict[str, Any]:
         env["INFLUXDB3_LICENSE_TYPE"] = args.license_type
         source = args.license_type
     log_path = path / "logs" / "license-activation.log"
-    secrets = (license_email,) if args.license_type else ()
+    storage_secrets: tuple[str, ...] = ()
+    if manifest["storage"]["type"] == "s3":
+        _, storage_secrets = read_aws_credentials(Path(manifest["storage"]["credentials_file"]))
+    secrets = (*storage_secrets, license_email) if args.license_type else storage_secrets
     try:
         with log_path.open("a", encoding="utf-8") as log:
             log.write(f"\nActivation attempt at {utc_now()} (source={source})\n"); log.flush()
@@ -502,8 +686,9 @@ def print_value(value: Any) -> None:
 
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__); sub = parser.add_subparsers(dest="command", required=True)
+    configure_parser = sub.add_parser("configure-s3"); configure_parser.add_argument("--output", required=True, type=Path); configure_parser.add_argument("--bucket"); configure_parser.add_argument("--aws-default-region"); configure_parser.add_argument("--aws-endpoint"); configure_parser.add_argument("--aws-allow-http", action="store_true")
     install_parser = sub.add_parser("install"); install_parser.add_argument("--edition", choices=("core", "enterprise"), required=True); install_parser.add_argument("--version"); install_parser.add_argument("--install-root", type=Path); install_parser.add_argument("--reinstall", action="store_true")
-    prepare_parser = sub.add_parser("prepare"); prepare_parser.add_argument("--database-id", required=True); prepare_parser.add_argument("--edition", choices=("core", "enterprise"), required=True); prepare_parser.add_argument("--version"); prepare_parser.add_argument("--install-root", type=Path); prepare_parser.add_argument("--database-root", type=Path)
+    prepare_parser = sub.add_parser("prepare"); prepare_parser.add_argument("--database-id", required=True); prepare_parser.add_argument("--edition", choices=("core", "enterprise"), required=True); prepare_parser.add_argument("--version"); prepare_parser.add_argument("--install-root", type=Path); prepare_parser.add_argument("--database-root", type=Path); prepare_parser.add_argument("--object-store", choices=("file", "s3"), default="file"); prepare_parser.add_argument("--bucket"); prepare_parser.add_argument("--aws-credentials-file", type=Path); prepare_parser.add_argument("--aws-default-region"); prepare_parser.add_argument("--aws-endpoint"); prepare_parser.add_argument("--aws-allow-http", action="store_true")
     activate_parser = sub.add_parser("activate"); activate_parser.add_argument("--database-id", required=True); activate_parser.add_argument("--database-root", type=Path); license_group = activate_parser.add_mutually_exclusive_group(required=True); license_group.add_argument("--license-file", type=Path); license_group.add_argument("--license-type", choices=("trial", "home")); activate_parser.add_argument("--license-email-env", default="INFLUXDB3_LICENSE_EMAIL"); activate_parser.add_argument("--license-email-stdin", action="store_true", help="read the activation email securely from one line of standard input"); activate_parser.add_argument("--http-port", type=int, default=8181); activate_parser.add_argument("--activation-timeout", type=int, default=600)
     list_parser = sub.add_parser("list"); list_parser.add_argument("--database-root", type=Path)
     inspect_parser = sub.add_parser("inspect"); inspect_parser.add_argument("--database-id", required=True); inspect_parser.add_argument("--database-root", type=Path)
@@ -531,7 +716,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         validate_args(args)
         if args.command in ("install", "prepare"):
             resolve_args_version(args)
-        if args.command == "install": value = install(args)
+        if args.command == "configure-s3": value = configure_s3(args)
+        elif args.command == "install": value = install(args)
         elif args.command == "prepare": value = prepare(args)
         elif args.command == "activate": value = activate(args)
         elif args.command in ("inspect", "verify"):

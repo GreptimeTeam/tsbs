@@ -1,4 +1,4 @@
 interface:
   display_name: "Setup InfluxDB 3"
-  short_description: "Install and prepare local InfluxDB 3"
-  default_prompt: "Use $setup-influxdb3 to install and prepare a local InfluxDB 3 Core or Enterprise database workspace."
+  short_description: "Prepare file or S3 InfluxDB 3 workspaces"
+  default_prompt: "Use $setup-influxdb3 to install and prepare a file- or S3-backed InfluxDB 3 Core or Enterprise workspace."

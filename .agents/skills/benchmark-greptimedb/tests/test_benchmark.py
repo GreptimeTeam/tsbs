@@ -85,6 +85,26 @@ class SummaryIntegrationTests(unittest.TestCase):
         self.assertIn("GreptimeDB config file: `/configs/scan.toml`", rendered)
         self.assertIn("set-a", rendered)
 
+    def test_external_target_storage_is_rendered_as_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            summary = summarize.build_summary(
+                Path(temp),
+                {
+                    "run_id": "run",
+                    "profile": "smoke",
+                    "database": "benchmark",
+                    "target": {
+                        "mode": "external",
+                        "endpoint": "http://localhost:4000",
+                    },
+                    "events": {"loads": [], "queries": []},
+                },
+            )
+
+        rendered = summarize.render_markdown(summary)
+        self.assertIn("Storage: `unknown`", rendered)
+        self.assertNotIn("Storage: `file`", rendered)
+
     def test_version_override_identity_is_rendered(self) -> None:
         summary = {
             "run_id": "run", "profile": "smoke", "database": "benchmark",
@@ -700,6 +720,35 @@ class ManagedDatabaseTests(unittest.TestCase):
             self.assertFalse(benchmark.target_matches(target, changed_target))
             legacy_target = {key: target[key] for key in ("mode", "endpoint", "database", "database_id", "version", "binary_sha256")}
             self.assertFalse(benchmark.target_matches(legacy_target, target))
+
+    def test_s3_workspace_defaults_to_its_config_and_rejects_location_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); config = root / "s3.toml"
+            config.write_text(
+                '[storage]\ntype = "S3"\nbucket = "bench"\nroot = "db-a"\n'
+                'endpoint = "http://minio:9000"\nregion = "us-west-1"\n'
+                'access_key_id = "access-value"\nsecret_access_key = "secret-value"\n',
+                encoding="utf-8",
+            )
+            args = benchmark.make_parser().parse_args(["query", "--database-id", "db-a"])
+            benchmark.resolve_database(args)
+            database = {
+                "storage": {
+                    "type": "s3", "config_file": str(config.resolve()), "bucket": "bench",
+                    "root": "db-a", "endpoint": "http://minio:9000", "region": "us-west-1",
+                    "enable_virtual_host_style": False,
+                }
+            }
+            self.assertEqual(benchmark.resolve_greptime_config(args, None, database), config.resolve())
+            identity, secrets = benchmark.config_storage(config)
+            self.assertEqual(identity, benchmark.manifest_storage(database))
+            log = root / "process.log"; log.write_text("failed secret-value access-value", encoding="utf-8")
+            benchmark.scrub_secrets(log, secrets)
+            self.assertNotIn("secret-value", log.read_text(encoding="utf-8"))
+
+            config.write_text(config.read_text().replace('root = "db-a"', 'root = "db-b"'), encoding="utf-8")
+            changed, _ = benchmark.config_storage(config)
+            self.assertNotEqual(changed, benchmark.manifest_storage(database))
 
     def test_connection_persists_config_before_startup_failure_and_reuses_it(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

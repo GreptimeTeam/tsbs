@@ -1,4 +1,4 @@
-# GreptimeDB local setup reference
+# GreptimeDB managed setup reference
 
 ## Workspace
 
@@ -25,7 +25,10 @@ macOS ARM64. Windows, Android, Docker, Kubernetes, package managers, and nightly
 builds are outside this managed benchmark workflow.
 
 Prepared manifests bind the database ID, SQL database name, release version,
-platform, installation path, and binary checksum. Dataset binding remains owned
+platform, installation path, binary checksum, and storage identity. Manifests
+without storage metadata are file-backed for compatibility. S3 manifests record
+the live TOML path and non-secret bucket/root settings; credentials remain only
+in that file. Dataset binding remains owned
 by the benchmark skill. Legacy benchmark manifests intentionally lack release
 identity and require an explicit `--greptime-bin`.
 
@@ -43,3 +46,8 @@ checksum, source manifest checksum, timestamp, method, file count, and byte
 count. The target version must be exact and already installed. Copying does not
 assert that GreptimeDB supports downgrade or upgrade startup for those data
 files.
+
+S3-backed workspaces cannot use `copy` because their primary bytes are not in
+the local `data/` directory. That directory remains available for WAL and cache
+state. Credential-bearing TOML files are user-owned, never copied or
+checksummed, and must not be printed or requested through conversation.

@@ -235,6 +235,52 @@ class DatabaseTests(unittest.TestCase):
         with mock.patch.object(setup, "port_available", side_effect=[False, True]), mock.patch.object(setup.time, "sleep"):
             self.assertTrue(setup.wait_port_available(8181))
 
+    def test_s3_credentials_reject_server_incompatible_optional_types(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            credentials = Path(temp) / "aws.json"
+            required = {
+                "aws_access_key_id": "access-value",
+                "aws_secret_access_key": "secret-value",
+            }
+            for field, value in (("aws_session_token", 123), ("expiry", "123")):
+                with self.subTest(field=field):
+                    credentials.write_text(json.dumps({**required, field: value}), encoding="utf-8")
+                    with self.assertRaisesRegex(setup.SetupError, field):
+                        setup.read_aws_credentials(credentials)
+
+    def test_s3_credentials_are_private_and_not_persisted_in_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); credentials = root / "aws.json"
+            args = setup.make_parser().parse_args([
+                "configure-s3", "--output", str(credentials), "--bucket", "bench",
+                "--aws-default-region", "us-west-1", "--aws-endpoint", "http://minio:9000",
+                "--aws-allow-http",
+            ])
+            stdin = mock.Mock(); stdin.isatty.return_value = True
+            with mock.patch.object(setup.sys, "stdin", stdin), mock.patch.object(
+                setup.getpass, "getpass", side_effect=["access-value", "secret-value", "secret-value", ""]
+            ):
+                generated = setup.configure_s3(args)
+            self.assertEqual(credentials.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn("access-value", json.dumps(generated))
+            self.assertNotIn("secret-value", json.dumps(generated))
+
+            self.make_installation(root)
+            prepare_args = self.args(root)
+            prepare_args.object_store = "s3"; prepare_args.bucket = "bench"
+            prepare_args.aws_credentials_file = credentials
+            prepare_args.aws_default_region = "us-west-1"; prepare_args.aws_endpoint = "http://minio:9000"
+            prepare_args.aws_allow_http = True
+            with mock.patch.object(setup, "platform_tag", return_value="linux_amd64"):
+                prepared = setup.prepare(prepare_args)
+            persisted = json.dumps(setup.read_json(Path(prepared["database_path"]) / "manifest.json"))
+            self.assertNotIn("access-value", persisted)
+            self.assertNotIn("secret-value", persisted)
+            self.assertEqual(prepared["storage"]["type"], "s3")
+            command = setup.storage_command(prepared["storage"], Path(prepared["database_path"]) / "data")
+            self.assertIn("--object-store=s3", command)
+            self.assertFalse(any(part.startswith("--data-dir=") for part in command))
+
 
 class ArgumentTests(unittest.TestCase):
     def test_version_must_be_omitted_or_exact_and_activation_email_is_required(self) -> None:

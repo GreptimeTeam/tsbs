@@ -446,7 +446,80 @@ def validate_database_manifest(path: Path, expected_id: str | None = None) -> di
     binding_fields = {"dataset_id", "spec", "format", "bytes", "sha256"}
     if binding is not None and (not isinstance(binding, dict) or set(binding) != binding_fields or not isinstance(binding.get("spec"), dict)):
         raise BenchmarkError(f"malformed database binding: {path / 'manifest.json'}")
+    manifest["storage"] = validate_storage(manifest.get("storage"))
     return manifest
+
+
+def read_aws_credentials(path: Path) -> tuple[str, ...]:
+    document = read_json(path)
+    for key in ("aws_access_key_id", "aws_secret_access_key"):
+        if not isinstance(document.get(key), str) or not document[key]:
+            raise BenchmarkError(f"InfluxDB S3 credentials file requires nonempty {key}")
+    if "aws_session_token" in document and not isinstance(document["aws_session_token"], str):
+        raise BenchmarkError("InfluxDB S3 credentials field aws_session_token must be a string")
+    if "expiry" in document and (
+        isinstance(document["expiry"], bool)
+        or not isinstance(document["expiry"], int)
+        or not 0 <= document["expiry"] <= 2**64 - 1
+    ):
+        raise BenchmarkError("InfluxDB S3 credentials field expiry must be an unsigned 64-bit integer")
+    return tuple(
+        document[key]
+        for key in ("aws_access_key_id", "aws_secret_access_key", "aws_session_token")
+        if isinstance(document.get(key), str) and document[key]
+    )
+
+
+def validate_storage(storage: Any) -> dict[str, Any]:
+    if storage is None:
+        return {"type": "file"}
+    if not isinstance(storage, dict) or storage.get("type") not in ("file", "s3"):
+        raise BenchmarkError("managed workspace storage identity is malformed")
+    if storage["type"] == "s3":
+        required = {"bucket", "credentials_file", "region", "endpoint", "allow_http"}
+        if (
+            not required.issubset(storage)
+            or not isinstance(storage["bucket"], str)
+            or not storage["bucket"]
+            or not isinstance(storage["region"], str)
+            or not storage["region"]
+            or storage["endpoint"] is not None and not isinstance(storage["endpoint"], str)
+            or not isinstance(storage["allow_http"], bool)
+        ):
+            raise BenchmarkError("managed workspace S3 identity is malformed")
+        if storage["endpoint"]:
+            parsed = urllib.parse.urlparse(storage["endpoint"])
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                raise BenchmarkError("managed workspace S3 endpoint is malformed")
+            if parsed.scheme == "http" and not storage["allow_http"]:
+                raise BenchmarkError("managed workspace HTTP S3 endpoint requires allow_http")
+        read_aws_credentials(Path(storage["credentials_file"]))
+    return storage
+
+
+def storage_command(storage: dict[str, Any], data_path: Path) -> list[str]:
+    if storage["type"] == "file":
+        return ["--object-store=file", f"--data-dir={data_path}"]
+    command = [
+        "--object-store=s3",
+        f"--bucket={storage['bucket']}",
+        f"--aws-credentials-file={storage['credentials_file']}",
+        f"--aws-default-region={storage['region']}",
+    ]
+    if storage.get("endpoint"):
+        command.append(f"--aws-endpoint={storage['endpoint']}")
+    if storage.get("allow_http"):
+        command.append("--aws-allow-http")
+    return command
+
+
+def scrub_secrets(path: Path, secrets: Sequence[str]) -> None:
+    if not path.exists() or not secrets:
+        return
+    value = path.read_text(encoding="utf-8", errors="replace")
+    for secret in secrets:
+        value = value.replace(secret, "<redacted-s3-credential>")
+    path.write_text(value, encoding="utf-8")
 
 
 def preflight_managed_binary(manifest: dict[str, Any]) -> None:
@@ -631,7 +704,8 @@ def connection(args: argparse.Namespace, run_dir: Path, manifest: dict[str, Any]
         except Exception:
             process_log.write(f"managed InfluxDB 3 HTTP port {args.http_port} is unavailable\n"); process_log.close()
             event.update(status="startup_failed", finished_at=utc_now()); save_manifest(run_dir, manifest); raise
-        command = [str(binary), "serve", "--object-store=file", f"--data-dir={workspace / 'data'}", f"--node-id={database_manifest['node_id']}", f"--http-bind=127.0.0.1:{args.http_port}", "--without-auth"]
+        storage = database_manifest["storage"]
+        command = [str(binary), "serve", *storage_command(storage, workspace / "data"), f"--node-id={database_manifest['node_id']}", f"--http-bind=127.0.0.1:{args.http_port}", "--without-auth"]
         if database_manifest["edition"] == "enterprise":
             command.append(f"--cluster-id={database_manifest['cluster_id']}")
             license_path = database_manifest.get("license", {}).get("path")
@@ -677,6 +751,8 @@ def connection(args: argparse.Namespace, run_dir: Path, manifest: dict[str, Any]
                 event["finished_at"] = utc_now()
             save_manifest(run_dir, manifest)
             process_log.close()
+            if storage["type"] == "s3":
+                scrub_secrets(process_log_path, read_aws_credentials(Path(storage["credentials_file"])))
 
 
 def add_run_options(parser: argparse.ArgumentParser) -> None:
@@ -754,11 +830,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 server = {"version": database_manifest.get("version"), "revision": None, "build": None} if managed else probe_servers(args.url, os.environ.get(args.auth_token_env, ""))
                 if previous and server["version"] is None:
                     server = {key: previous.get(key) for key in ("version", "revision", "build")}
-                target = {"mode": "managed" if managed else "external", "urls": endpoint.split(","), "database": args.database, "database_id": args.database_id if managed else None, "edition": edition, "version": server["version"], "revision": server["revision"], "build": server["build"], "binary_sha256": database_manifest.get("binary_sha256") if managed else None, "no_sync": getattr(args, "no_sync", previous.get("no_sync", False)), "accept_partial": getattr(args, "accept_partial", previous.get("accept_partial", False))}
+                storage = database_manifest["storage"] if managed else None
+                target = {"mode": "managed" if managed else "external", "urls": endpoint.split(","), "database": args.database, "database_id": args.database_id if managed else None, "edition": edition, "version": server["version"], "revision": server["revision"], "build": server["build"], "binary_sha256": database_manifest.get("binary_sha256") if managed else None, "storage": storage, "no_sync": getattr(args, "no_sync", previous.get("no_sync", False)), "accept_partial": getattr(args, "accept_partial", previous.get("accept_partial", False))}
                 identity = ("mode", "urls", "database", "database_id", "edition", "version", "binary_sha256")
                 if args.command in ("load", "all"):
                     identity += ("no_sync", "accept_partial")
-                if previous and any(previous.get(key) != target.get(key) for key in identity):
+                previous_storage = previous.get("storage", {"type": "file"} if managed else None)
+                if previous and (any(previous.get(key) != target.get(key) for key in identity) or previous_storage != storage):
                     raise BenchmarkError("target conflicts with the target pinned by this run")
                 manifest["target"] = target; save_manifest(run_dir, manifest)
                 if args.command in ("load", "all"): load_data(args, run_dir, manifest, endpoint, managed, database_manifest, database_path)

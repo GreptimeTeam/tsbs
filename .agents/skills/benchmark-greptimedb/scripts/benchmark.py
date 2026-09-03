@@ -25,6 +25,8 @@ from typing import Any, Iterator, Sequence
 SCRIPT_PATH = Path(__file__).resolve()
 sys.path.insert(0, str(SCRIPT_PATH.parents[3] / "lib"))
 
+import tomli  # noqa: E402
+
 from tsbs_benchmark import (  # noqa: E402
     FIXED_HOST_QUERY_TYPES,
     PROFILES,
@@ -553,10 +555,12 @@ def explicit_binary_version(binary: Path) -> str:
 def resolve_greptime_config(
     args: argparse.Namespace,
     existing_target: dict[str, Any] | None = None,
+    database_manifest: dict[str, Any] | None = None,
 ) -> Path | None:
     requested = getattr(args, "greptime_config", None)
     recorded = (existing_target or {}).get("config_file")
-    path = requested.expanduser().resolve() if requested else Path(recorded) if recorded else None
+    prepared = (database_manifest or {}).get("storage", {}).get("config_file")
+    path = requested.expanduser().resolve() if requested else Path(recorded) if recorded else Path(prepared) if prepared else None
     if path is None:
         return None
     if not path.is_file():
@@ -567,6 +571,56 @@ def resolve_greptime_config(
     except OSError as exc:
         raise BenchmarkError(f"GreptimeDB config file is not readable: {path}") from exc
     return path
+
+
+def config_storage(path: Path) -> tuple[dict[str, Any], tuple[str, ...]]:
+    try:
+        with path.open("rb") as stream:
+            document = tomli.load(stream)
+    except tomli.TOMLDecodeError as exc:
+        raise BenchmarkError(f"invalid GreptimeDB TOML config {path}: {exc}") from exc
+    storage = document.get("storage")
+    if storage is None:
+        return {"type": "file"}, ()
+    if not isinstance(storage, dict):
+        raise BenchmarkError("GreptimeDB config storage must be a table")
+    storage_type = storage.get("type", "File")
+    if not isinstance(storage_type, str) or storage_type.lower() not in ("file", "s3"):
+        raise BenchmarkError("GreptimeDB managed storage type must be File or S3")
+    if storage_type.lower() == "file":
+        return {"type": "file"}, ()
+    for key in ("bucket", "root", "access_key_id", "secret_access_key"):
+        if not isinstance(storage.get(key), str) or not storage[key]:
+            raise BenchmarkError(f"GreptimeDB S3 config requires nonempty storage.{key}")
+    virtual_host = storage.get("enable_virtual_host_style", False)
+    if not isinstance(virtual_host, bool):
+        raise BenchmarkError("storage.enable_virtual_host_style must be a boolean")
+    identity = {
+        "type": "s3",
+        "bucket": storage["bucket"],
+        "root": storage["root"],
+        "endpoint": storage.get("endpoint"),
+        "region": storage.get("region"),
+        "enable_virtual_host_style": virtual_host,
+    }
+    return identity, (storage["access_key_id"], storage["secret_access_key"])
+
+
+def manifest_storage(manifest: dict[str, Any]) -> dict[str, Any]:
+    storage = manifest.get("storage", {"type": "file"})
+    if not isinstance(storage, dict) or storage.get("type") not in ("file", "s3"):
+        raise BenchmarkError("managed workspace storage identity is malformed")
+    return {key: value for key, value in storage.items() if key != "config_file"}
+
+
+def scrub_secrets(path: Path, secrets: Sequence[str]) -> None:
+    if not path.exists() or not secrets:
+        return
+    value = path.read_text(encoding="utf-8", errors="replace")
+    for secret in secrets:
+        if secret:
+            value = value.replace(secret, "<redacted-s3-credential>")
+    path.write_text(value, encoding="utf-8")
 
 
 def managed_target(
@@ -605,6 +659,7 @@ def managed_target(
         "workspace_binary_sha256": workspace_checksum,
         "binary_override": binary_override,
         "version_override": bool(runtime_version and workspace_version and runtime_version != workspace_version),
+        "storage": manifest_storage(manifest),
     }
     if config_file is not None:
         target["config_file"] = str(config_file)
@@ -620,7 +675,7 @@ def target_matches(existing: dict[str, Any], requested: dict[str, Any]) -> bool:
         "workspace_binary_sha256",
         "version_override",
     }
-    if previous_fields.issubset(existing) and not existing.keys() - (previous_fields | {"config_file"}):
+    if previous_fields.issubset(existing) and not existing.keys() - (previous_fields | {"config_file", "storage"}):
         if existing.get("config_file") != requested.get("config_file"):
             return False
         return existing == {key: requested.get(key) for key in existing}
@@ -807,7 +862,11 @@ def managed_workspace(
     workspace, database_manifest = prepare_database_workspace(args)
     with lock_database(workspace):
         binary = managed_binary(args, database_manifest)
-        config_file = resolve_greptime_config(args, existing_target)
+        config_file = resolve_greptime_config(args, existing_target, database_manifest)
+        workspace_storage = manifest_storage(database_manifest)
+        selected_storage, _ = config_storage(config_file) if config_file else ({"type": "file"}, ())
+        if selected_storage != workspace_storage:
+            raise BenchmarkError("GreptimeDB config storage does not match the prepared workspace storage identity")
         target = managed_target(args, database_manifest, binary, config_file)
         if existing_target and not target_matches(existing_target, target):
             raise BenchmarkError("run target is immutable; create a new run for another GreptimeDB version or target")
@@ -824,6 +883,7 @@ def managed_process(
     config_file: Path | None = None,
 ) -> Iterator[str]:
     process_log_path.parent.mkdir(parents=True, exist_ok=True)
+    _, secrets = config_storage(config_file) if config_file else ({"type": "file"}, ())
     process_log = process_log_path.open("a", encoding="utf-8")
     try:
         check_port_available(args.http_port)
@@ -856,6 +916,7 @@ def managed_process(
             try: process.wait(timeout=15)
             except subprocess.TimeoutExpired: os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=5)
         process_log.close()
+        scrub_secrets(process_log_path, secrets)
 
 
 @contextlib.contextmanager
