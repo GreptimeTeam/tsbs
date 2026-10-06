@@ -12,6 +12,9 @@ GOFMT=$(GOCMD) fmt
 
 all: generators loaders runners
 
+arm64: export GOARCH := arm64
+arm64: all
+
 generators: tsbs_generate_data \
 			tsbs_generate_queries
 
@@ -61,7 +64,7 @@ coverage:
 
 tsbs_%: $(wildcard ./cmd/$@/*.go)
 	$(GOGET) ./cmd/$@
-	$(GOBUILD) -o bin/$@ ./cmd/$@
+	$(GOBUILD) -o bin$(if $(GOARCH),_$(GOARCH))/$@ ./cmd/$@
 	$(GOINSTALL) ./cmd/$@
 
 checkfmt:
