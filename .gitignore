@@ -4,7 +4,7 @@
 .idea
 .vscode
 *~
-bin
+bin*
 .benchmarks/
 __pycache__/
 *.py[cod]
